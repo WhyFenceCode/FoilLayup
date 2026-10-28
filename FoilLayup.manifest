@@ -1,0 +1,14 @@
+{
+  "autodeskProduct": "Fusion",
+  "type": "addin",
+  "id": "8f3c1e7a-6c2b-4d0e-9a51-0f4b2d7e9c31",
+  "author": "",
+  "description": {
+    "": "Composite layup design for hydrofoil wings: define layers from the outside in, split the body into plies and core, plan seams and export flat patterns."
+  },
+  "version": "0.1.0",
+  "runOnStartup": false,
+  "supportedOS": "windows|mac",
+  "editEnabled": true,
+  "iconFilename": ""
+}

@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Foil Layup</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">Foil Layup</div>
+  <nav id="tabs">
+    <button data-tab="setup" class="on">1 Setup</button>
+    <button data-tab="materials">2 Materials</button>
+    <button data-tab="stack">3 Stack</button>
+    <button data-tab="keepouts">4 Keep-outs</button>
+    <button data-tab="build">5 Build &amp; flatten</button>
+  </nav>
+  <div id="totals" class="totals"></div>
+</header>
+
+<main>
+<!-- ============================================================ SETUP -->
+<section id="tab-setup" class="tab on">
+  <div class="grid2">
+    <div class="card">
+      <h3>Foil body</h3>
+      <label>Body <select id="target"></select></label>
+      <div class="row">
+        <button id="useSel">Use selected body</button>
+        <button id="refreshLists" class="ghost">Refresh lists</button>
+      </div>
+      <p class="hint">Pick the closed wing body. Flaps and pods are treated as part of it.</p>
+      <h3>Orientation</h3>
+      <div class="fields">
+        <label>Span axis <select id="spanAxis"><option>auto</option><option>X</option><option>Y</option><option>Z</option></select></label>
+        <label>Up axis <select id="upAxis"><option>auto</option><option>X</option><option>Y</option><option>Z</option></select></label>
+        <label class="chk"><input type="checkbox" id="flipUp"> Flip top / bottom</label>
+        <label class="chk"><input type="checkbox" id="symmetric" checked> Symmetric about centre (span limits are distances from the centre)</label>
+        <label>Centre offset <span class="u"></span> <input type="number" id="spanCentre" step="any" value="0"></label>
+      </div>
+      <p class="hint" id="upHint"></p>
+    </div>
+    <div class="card">
+      <h3>Geometry resolution</h3>
+      <div class="fields">
+        <label>Loft stations <input type="number" data-set="loftStations" min="8" max="150"></label>
+        <label>Loft points / section <input type="number" data-set="loftPoints" min="40" max="400" step="2"></label>
+        <label>Ply drop ramp (length : thickness) <input type="number" data-set="dropRatio" min="1" step="any"></label>
+        <label>Min inner gap (mm) <input type="number" data-set="minGap" min="0.01" step="any"></label>
+        <label title="An inner ply stops where the space left inside the layers above it is thinner than this many times its own thickness; the outer layers carry on to the edge.">Ply stop: end each inner ply where space &lt; &times; its thickness <input type="number" data-set="plyEndRatio" min="0" step="0.1"></label>
+        <label>Tip inset (mm) <input type="number" data-set="tipInset" min="0.05" step="any"></label>
+        <label class="chk"><input type="checkbox" data-set="hideOriginal"> Hide original body after Generate</label>
+      </div>
+      <div class="row"><button id="analyze" class="primary">Analyze body</button></div>
+      <div id="analysisInfo" class="info"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Planform <span class="hint">click to choose the preview section</span></h3>
+    <div id="planform" class="plot"></div>
+  </div>
+</section>
+
+<!-- ============================================================ MATERIALS -->
+<section id="tab-materials" class="tab">
+  <div class="card">
+    <div class="row">
+      <input id="matFilter" placeholder="Filter materials..." class="grow">
+      <button id="matNew">New material</button>
+      <button id="libSave" class="primary">Save library</button>
+    </div>
+    <p class="hint">Built-in materials are read-only; duplicate one to change it. Thickness is the cured ply thickness used for the layup. <span id="libPath"></span></p>
+    <div class="scroll"><table id="matTable" class="tbl"></table></div>
+  </div>
+</section>
+
+<!-- ============================================================ STACK -->
+<section id="tab-stack" class="tab">
+  <div class="card">
+    <div class="row">
+      <label>Preset <select id="presetSel"></select></label>
+      <button id="presetApply">Replace stack</button>
+      <button id="presetAppend" class="ghost">Append layers</button>
+      <span class="sep"></span>
+      <input id="presetName" placeholder="Preset name">
+      <button id="presetSave">Save stack as preset</button>
+      <span class="sep"></span>
+      <button id="importStack" class="ghost">Import JSON/CSV</button>
+      <button id="exportStack" class="ghost">Export JSON/CSV</button>
+    </div>
+  </div>
+  <div class="grid2 wide-left">
+    <div>
+      <div class="card">
+        <h3>Outside the body <span class="hint">peel ply, release film, mats; listed from the surface outward</span></h3>
+        <table class="tbl layers" id="extTable"></table>
+        <button class="add" data-add="external">+ External layer</button>
+      </div>
+      <div class="card">
+        <h3>Body layers <span class="hint">listed from the outside in; whatever is left becomes the core</span></h3>
+        <table class="tbl layers" id="layerTable"></table>
+        <button class="add" data-add="layers">+ Layer</button>
+        <div class="fields core">
+          <label>Core material <select id="coreMat"></select></label>
+          <label>Core name <input id="coreName"></label>
+        </div>
+      </div>
+    </div>
+    <div class="card sticky">
+      <h3>Section preview</h3>
+      <div class="row">
+        <label>Station <span class="u"></span> <input type="number" id="pvS" step="any" value="0"></label>
+        <label>Thickness &times; <input type="range" id="pvExag" min="1" max="6" step="0.5" value="1"></label>
+        <select id="pvZoom"><option value="all">Whole section</option><option value="le">Leading edge</option><option value="te">Trailing edge</option></select>
+        <button id="pvGo">Update</button>
+      </div>
+      <div id="preview" class="plot tall"></div>
+      <div id="pvLegend" class="legend"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ KEEPOUTS -->
+<section id="tab-keepouts" class="tab">
+  <div class="card">
+    <h3>Keep-out bodies</h3>
+    <p class="hint">Fittings, chain plates, bulbs, inserts. Every layer, the core and the external layers are cut around them (grown by the clearance). Holes are added to the flat patterns.</p>
+    <div class="row">
+      <select id="koBody" class="grow"></select>
+      <button id="koAdd">Add</button>
+      <button id="koSel" class="ghost">Add selected</button>
+    </div>
+    <table class="tbl" id="koTable"></table>
+  </div>
+</section>
+
+<!-- ============================================================ BUILD -->
+<section id="tab-build" class="tab">
+  <div class="grid2">
+    <div class="card">
+      <h3>Seams</h3>
+      <div class="fields">
+        <label>Min stagger between nearby seams <span class="u"></span> <input type="number" data-set="seamStagger" data-len step="any"></label>
+        <label>Plies either side that must be staggered <input type="number" data-set="seamWindow" min="0" max="20"></label>
+        <label>Min distance from edges / ply edges <span class="u"></span> <input type="number" data-set="seamEdgeMargin" data-len step="any"></label>
+        <label>Lap overlap past seam <span class="u"></span> <input type="number" data-set="seamOverlap" data-len step="any" min="0"></label>
+        <label>Preferred side <select data-set="seamPreferSide"><option>bottom</option><option>top</option></select></label>
+      </div>
+      <div class="row"><button id="replanSeams" class="ghost">Forget locked seams</button></div>
+      <p class="hint">Generate locks the seams it planned so Flatten matches the 3D seam lines.</p>
+    </div>
+    <div class="card">
+      <h3>Flat patterns</h3>
+      <div class="fields">
+        <label>Flatten stations <input type="number" data-set="flatStations" min="10" max="200"></label>
+        <label>Flatten points / section <input type="number" data-set="flatPoints" min="40" max="400" step="2"></label>
+        <label>Relaxation iterations <input type="number" data-set="flatIterations" min="20" max="2000"></label>
+        <label>Roll width <span class="u"></span> <input type="number" data-set="rollWidth" data-len step="any"></label>
+        <label class="chk"><input type="checkbox" id="flatSketches" checked> Also draw patterns as sketches in Fusion</label>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="row">
+      <button id="generate" class="primary big">Generate layers in Fusion</button>
+      <button id="flatten" class="primary big">Flatten &amp; export patterns</button>
+      <span id="busy" class="busy"></span>
+    </div>
+    <p class="hint">Generate copies the body, splits it into layers and core in one Base Feature (one undo step) and replaces a previous run. Flatten asks for an output folder.</p>
+  </div>
+  <div class="card"><h3>Results</h3><div id="results"></div></div>
+  <div class="card"><h3>Log</h3><pre id="log"></pre></div>
+</section>
+</main>
+
+<datalist id="seamOpts"><option value="auto"><option value="te"><option value="le"><option value="bottom:60"><option value="top:40"></datalist>
+<script src="app.js"></script>
+</body>
+</html>
