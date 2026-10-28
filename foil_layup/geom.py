@@ -233,18 +233,21 @@ def medial_radius(pts, normals, cap=1e6):
     return out
 
 
-def offset_loop(pts, normals, h, depth, min_gap):
+def offset_loop(pts, normals, h, depth, min_gap, allowed=None):
     """Offset a CCW loop inward by a per-vertex depth (mm).
 
     Vertices whose offset would come within min_gap of the medial axis are
     dropped, which trims the loop where the section is too thin (trailing edge,
     tips). Returns (points, kept_indices) or (None, []) if the loop vanished.
-    Negative depths offset outward and are never trimmed.
+    Negative depths offset outward and are never trimmed. allowed (a set of
+    vertex indices) additionally drops vertices a surface above was trimmed at.
     """
     out, kept = [], []
     for i, p in enumerate(pts):
         d = depth[i]
         if d > 0 and d > h[i] - min_gap:
+            continue
+        if allowed is not None and i not in allowed:
             continue
         out.append((p[0] + normals[i][0] * d, p[1] + normals[i][1] * d))
         kept.append(i)
@@ -338,7 +341,8 @@ def clamp_inside(loop, outer, margin):
     and the two surfaces coincide) are left exactly as they are."""
     out = []
     for p in loop:
-        if signed_distance_polys(p, [outer]) >= -1e-6:
+        # resampled polylines of coincident curves differ by sag noise (~1e-3 mm)
+        if signed_distance_polys(p, [outer]) >= -0.02:
             out.append(p)
             continue
         q = nearest_on_polygon(p, outer)

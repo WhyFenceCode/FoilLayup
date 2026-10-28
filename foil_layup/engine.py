@@ -26,7 +26,7 @@ def depth_tables(stack, sections, frame, bounds):
     return deps, ext
 
 
-def boundary_loop(sec, depth, min_gap):
+def boundary_loop(sec, depth, min_gap, allowed=None, with_kept=False):
     """Offset loop for one surface at one section, ready for lofting.
 
     Trimmed loops (too thin at the TE / tips) get their bridged tip rounded and
@@ -34,23 +34,28 @@ def boundary_loop(sec, depth, min_gap):
     so neighbouring sections loft cleanly. Loops that are tiny or cross
     themselves are dropped (None) and the loft simply skips that station.
     """
-    pts, kept = geom.offset_loop(sec.pts, sec.n, sec.h, depth, min_gap)
+    pts, kept = geom.offset_loop(sec.pts, sec.n, sec.h, depth, min_gap, allowed)
     if pts is None:
-        return None
+        return (None, set()) if with_kept else None
+    kept_set = set(kept)
+
+    def done(loop):
+        return (loop, kept_set if loop is not None else set()) if with_kept else loop
+
     if len(kept) < sec.m:
         xs = [p[0] for p in pts]
         ys = [p[1] for p in pts]
         if max(xs) - min(xs) < 8 * min_gap or max(ys) - min(ys) < 4 * min_gap:
-            return None
+            return done(None)
         try:
             pts = geom.airfoil_resample(geom.chaikin(pts, 2), sec.m)
         except (ValueError, ZeroDivisionError):
-            return None
+            return done(None)
     else:
         pts, kept = geom.rotate_loop_start(pts, kept, 0)
     if geom.signed_area(pts) <= 0 or geom.self_intersects(pts):
-        return None
-    return pts
+        return done(None)
+    return done(pts)
 
 
 def loft_plan(stack, sections, deps, ext, min_gap):
@@ -64,17 +69,23 @@ def loft_plan(stack, sections, deps, ext, min_gap):
     ends with a blunt end and the outer layers carry on to the edge.
     """
     plan = {}
-    prev = [sec.pts for sec in sections]  # surface each new one must stay inside
+    prev = [sec.pts for sec in sections]          # surface each new one must stay inside
+    allowed = [set(range(sec.m)) for sec in sections]  # vertices still kept by the surfaces above
     for ri, row in enumerate(stack.units):
         nxt = stack.units[ri + 1] if ri + 1 < len(stack.units) else None
         gap = model.end_gap(nxt.ply_t, stack.settings, nxt.end_gap) if nxt else min_gap
-        after = [_nested(boundary_loop(sec, deps[i][ri]["after"], gap), prev[i])
-                 for i, sec in enumerate(sections)]
+        after, kept = [], []
+        for i, sec in enumerate(sections):
+            loop, k = boundary_loop(sec, deps[i][ri]["after"], gap, allowed[i], with_kept=True)
+            after.append(_nested(loop, prev[i]))
+            kept.append(k)
         plan["after:%s" % row.id] = [(sec.s, after[i]) for i, sec in enumerate(sections)]
         if not row.is_full:
-            plan["full:%s" % row.id] = [(sec.s, _nested(boundary_loop(sec, deps[i][ri]["full"], gap), prev[i]))
-                                        for i, sec in enumerate(sections)]
+            plan["full:%s" % row.id] = [
+                (sec.s, _nested(boundary_loop(sec, deps[i][ri]["full"], gap, allowed[i]), prev[i]))
+                for i, sec in enumerate(sections)]
         prev = after
+        allowed = kept
     for ri, row in enumerate(stack.ext_units):
         plan["ext:%s" % row.id] = [(sec.s, boundary_loop(sec, ext[i][ri]["after"], min_gap))
                                    for i, sec in enumerate(sections)]
