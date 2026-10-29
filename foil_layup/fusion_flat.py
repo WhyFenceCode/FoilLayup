@@ -40,7 +40,7 @@ def flatten(stack_data, user_materials, folder, make_sketches, log, progress):
     raw = sample_sections(native, frame, int(st["flatStations"]), float(st["tipInset"]),
                           model.span_limit_stations(stack, frame),
                           lambda k, n: progress("Sampling sections", k, n))
-    sections = engine.build_sections(raw, int(st["flatPoints"]))
+    sections = engine.build_sections(raw, int(st["flatPoints"]), float(st["chordRefSmoothing"]))
     if len(sections) < 3:
         raise FusionError("Could not slice the body; check the span axis.")
     bounds = load_bounds(stack.bound_sketches, frame, log)

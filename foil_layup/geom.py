@@ -252,17 +252,56 @@ def offset_trimmed(pts, normals, h, depth, trim):
         return [P(j) for j in range(n)], False
     if all(v < 0 for v in f):
         return None, True
+    # Walk from the start of a usable run. Each gap (TE, tips, a thin LE) is
+    # closed with a smooth rounded cap between its two exact cut points, so the
+    # tip has no hooks whatever the edge shape (sharp, blunt, rounded).
+    start = next(j for j in range(n) if f[j] >= 0 and f[j - 1] < 0)
     out = []
-    for j in range(n):
+    gap_from = None
+    skip_next = False
+    for step in range(n):
+        j = (start + step) % n
         k = (j + 1) % n
         if f[j] >= 0:
-            out.append(P(j))
+            if skip_next and out:
+                skip_next = False  # too close to the cut point just placed
+            else:
+                out.append(P(j))
         if (f[j] >= 0) != (f[k] >= 0):
             t = f[j] / (f[j] - f[k])
-            out.append(lerp(P(j), P(k), t))
+            cut = lerp(P(j), P(k), t)
+            close = 0.3 * dist(P(j), P(k))
+            if f[j] >= 0:  # leaving a usable run
+                if out and dist(out[-1], cut) < close:
+                    out.pop()
+                out.append(cut)
+                gap_from = cut
+            else:          # entering a usable run: cap from gap_from to cut
+                if gap_from is not None:
+                    out.extend(_round_cap(gap_from, cut))
+                out.append(cut)
+                skip_next = dist(cut, P(k)) < close
     if len(out) < 8 or signed_area(out) <= 0:
         return None, True
     return out, True
+
+
+def _round_cap(a, b, segments=6, bulge=0.5):
+    """Points strictly between a and b on a half-ellipse bulging to the right
+    of a->b (outward for a CCW loop), depth = bulge x half the gap."""
+    m = lerp(a, b, 0.5)
+    d = sub(b, a)
+    L = norm(d)
+    if L < 1e-9:
+        return []
+    out_n = (d[1] / L, -d[0] / L)
+    r = 0.5 * L * bulge
+    pts = []
+    for i in range(1, segments):
+        th = math.pi * i / segments
+        pts.append((m[0] + (a[0] - m[0]) * math.cos(th) + out_n[0] * r * math.sin(th),
+                    m[1] + (a[1] - m[1]) * math.cos(th) + out_n[1] * r * math.sin(th)))
+    return pts
 
 
 # --------------------------------------------------------------------------- planform polygons

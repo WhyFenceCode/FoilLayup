@@ -155,7 +155,7 @@ class Builder:
             return (self._loft_range(stations, profs, i0, mid, name)
                     + self._loft_range(stations, profs, mid, i1, name))
 
-    def _robust_loft(self, run, make_profile, name, inset=0.0):
+    def _robust_loft(self, run, make_profile, name, inset=0.0, tips=(True, True)):
         """One smooth loft through run [(s, section)].
 
         Loft pieces are never joined (joined pieces make unreliable cutting
@@ -192,12 +192,14 @@ class Builder:
                 self._loft_range(stations, profs, 0, n - 1, name)  # diagnosis only
             except _BadSpan as e:
                 edge = max(1, n // 4)
-                if e.i1 <= edge:
+                # only a real wing tip may be cut short; a zone end at the centre must
+                # reach past the cut plane, so a failure there drops a section instead
+                if e.i1 <= edge and tips[0]:
                     self.log("%s: cannot loft s=%.1f..%.1f (%s); surface starts at s=%.1f instead"
                              % (name, stations[e.i0], stations[e.i1], e.msg, stations[e.i1]))
                     run = run[e.i1:]
                     run[0] = (run[0][0] + end_shift, run[0][1])
-                elif e.i0 >= n - 1 - edge:
+                elif e.i0 >= n - 1 - edge and tips[1]:
                     self.log("%s: cannot loft s=%.1f..%.1f (%s); surface ends at s=%.1f instead"
                              % (name, stations[e.i0], stations[e.i1], e.msg, stations[e.i0]))
                     run = run[:e.i0 + 1]
@@ -228,7 +230,7 @@ class Builder:
                           "section, a different number of loft stations, or a larger min inner gap"
                           % (name, run[0][0], run[-1][0]) if run else "Could not loft '%s'" % name)
 
-    def loft(self, entries, name, inset=0.0):
+    def loft(self, entries, name, inset=0.0, tips=(True, True)):
         """Transient solid lofted through closed fitted splines at (s, loop2d).
 
         inset (mm) moves the two end sections inward along the span, so nested
@@ -237,7 +239,7 @@ class Builder:
         run = engine.longest_run(entries)
         if len(run) < 2:
             return None
-        return self._robust_loft(_shift_ends(run, inset), self._spline_profile, name, inset)
+        return self._robust_loft(_shift_ends(run, inset, *tips), self._spline_profile, name, inset, tips)
 
     def loft_polys(self, entries, name, outset=1.0):
         """Transient solid lofted through straight-sided polygons (side masks),
@@ -327,6 +329,20 @@ class Builder:
             inp.targetBaseFeature = self.base
         self.comp.features.offsetFacesFeatures.add(inp)
         return self._to_temp([real])[0]
+
+    def span_box(self, s0, s1):
+        """Transient box covering the whole section between span positions s0 and s1."""
+        bb = self.frame["bbox_local"]
+        ext = BIG_EXTEND * 2
+        s0 = max(s0, bb[0][0] - ext)
+        s1 = min(s1, bb[1][0] + ext)
+        lo = [s0, bb[0][1] - ext, bb[0][2] - ext]
+        hi = [s1, bb[1][1] + ext, bb[1][2] + ext]
+        centre = to_model(self.frame, (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2)
+        obb = adsk.core.OrientedBoundingBox3D.create(
+            centre, vec(self.frame["S"]), vec(self.frame["C"]),
+            (hi[0] - lo[0]) * CM, (hi[1] - lo[1]) * CM, (hi[2] - lo[2]) * CM)
+        return self.tbm.createBox(obb)
 
     def box(self):
         bb = self.frame["bbox_local"]
@@ -462,9 +478,9 @@ def generate(stack_data, user_materials, log, progress):
 
     progress("Sampling sections", 0, 1)
     raw = sample_sections(native, frame, int(st["loftStations"]), float(st["tipInset"]),
-                          model.span_limit_stations(stack, frame),
+                          model.span_limit_stations(stack, frame) + ([0.0] if frame.get("symmetric", True) else []),
                           lambda k, n: progress("Sampling sections", k, n))
-    sections = engine.build_sections(raw, int(st["loftPoints"]))
+    sections = engine.build_sections(raw, int(st["loftPoints"]), float(st["chordRefSmoothing"]))
     if len(sections) < 3:
         raise FusionError("Could not slice the body; check the span axis.")
     lo = [min(sec.s for sec in sections), min(p[0] for sec in sections for p in sec.pts),
@@ -491,89 +507,22 @@ def generate(stack_data, user_materials, log, progress):
     made = []     # (real body, role, info, material)
     skipped = []  # plies that could not be built
     try:
-        cur = b.copy(native)
         n_rows = len(stack.units)
         step = _end_step(sections, max(n_rows, len(stack.ext_units)))
         thickness_span = 2 * max(abs(hi[2]), abs(lo[2])) + 2 * BIG_EXTEND
-        for ri, row in enumerate(stack.units):
-            progress("Layer %d/%d: %s" % (ri + 1, n_rows, row.name), ri, n_rows + 2)
-            label = "FL%02d %s" % (ri + 1, row.name)
-            info = {"row": row.id, "name": row.name, "material": row.material["id"],
-                    "angles": [p.angle for p in row.plies], "t": row.t}
-            if cur is None:
-                log("Layer '%s' has no room left; skipped" % row.name)
-                continue
-            inset = step * (ri + 1)  # each inner surface ends a little inside the one above
-            after = b.loft(plan["after:%s" % row.id], "FL S%d" % (ri + 1), inset)
-            # tools: the inner surface to cut out, and the masks limiting this ply
-            slot = fill = None
-            errors = []
-            try:
-                if row.is_full:
-                    inner = after
-                else:
-                    inner = b.loft(plan["full:%s" % row.id], "FL F%d" % (ri + 1), inset)
-                mask = None
-                if row.side != "wrap":
-                    quads = [(sec.s, engine.side_mask_quads(sec, row.side, sec.chord + BIG_EXTEND))
-                             for sec in sections]
-                    mask = b.loft_polys(quads, "FL side mask %d" % (ri + 1))
-                region = (_region_tool(b, row, sections, frame, bounds, thickness_span, ri)
-                          if row.has_region else None)
-            except FusionError as e:
-                log("WARNING: %s could not be built and was skipped (tools: %s)" % (label, e))
-                skipped.append(label)
-                cur = after
-                continue
-            # Limits first on a fresh copy of the surface above, then the cut, is the
-            # gentlest order for the kernel; the other order is the fallback.
-            for order in ("limits first", "cut first"):
-                try:
-                    slot, fill = _ply_body(b, cur, inner, mask, region, bool(row.outside), order, label, row.side)
-                    break
-                except FusionError as e:
-                    errors.append("%s: %s" % (order, e))
-                    slot = fill = None
-            if slot is None:
-                log("WARNING: %s could not be built and was skipped (%s)" % (label, "; ".join(errors)))
-                skipped.append(label)
-                cur = after
-                continue
-            if _has_volume(slot):
-                pending.append((slot, label, "ply", info, row.material))
-            else:
-                log("Layer '%s' came out empty" % row.name)
-            if fill is not None and _has_volume(fill):
-                if row.outside == "core":
-                    pending.append((fill, "%s fill (core)" % label, "corefill", info, stack.core_material))
-                else:
-                    m = stack.materials[row.outside]
-                    pending.append((fill, "%s fill %s" % (label, m["name"]), "fill",
-                                    dict(info, material=m["id"]), m))
-            cur = after
-        # core, with any 'core' fills joined in
-        if cur is not None and _has_volume(cur):
-            for p in [p for p in pending if p[2] == "corefill"]:
-                try:
-                    b.boolean(cur, p[0], "union", "core + %s" % p[1])
-                    pending.remove(p)
-                except FusionError as e:
-                    log("Could not join %s into the core (%s); kept separate" % (p[1], e))
-            pending.append((cur, stack.core_name, "core", {"material": stack.core_material["id"]},
-                            stack.core_material))
-        # external layers: ext_k = E_k - E_{k-1}, E_0 = the original body
-        prev = b.copy(native)
-        for ri, row in enumerate(stack.ext_units):
-            progress("External %d/%d: %s" % (ri + 1, len(stack.ext_units), row.name), n_rows, n_rows + 2)
-            # outer layers end slightly inside the layer below so it cuts cleanly through
-            outer = b.loft(plan["ext:%s" % row.id], "FL E%d" % (ri + 1), step * (ri + 1))
-            if outer is None:
-                continue
-            keep_outer = b.copy(outer)
-            b.boolean(outer, prev, "cut", "FX%02d %s" % (ri + 1, row.name))
-            pending.append((outer, "FX%02d %s" % (ri + 1, row.name), "external",
-                            {"row": row.id, "name": row.name, "material": row.material["id"]}, row.material))
-            prev = keep_outer
+        ctx = dict(b=b, stack=stack, native=native, plan=plan, sections=sections, frame=frame,
+                   bounds=bounds, step=step, thickness_span=thickness_span, log=log,
+                   progress=progress, skipped=skipped)
+        if frame.get("symmetric", True) and sections[0].s < 0 < sections[-1].s:
+            # One smooth loft through a whole symmetric wing (hub included) is
+            # fragile; each half is built on its own and joined at the centre plane.
+            halves = []
+            for zone in ((-1e9, 0.0), (0.0, 1e9)):
+                progress("Building %s half" % ("left" if zone[0] < 0 else "right"), 0, 1)
+                halves.append(_build_zone(ctx, zone))
+            pending = _join_halves(b, halves, log)
+        else:
+            pending = _build_zone(ctx, None)
         # keep-outs: cut every result, keep the grown tool (hidden) for Flatten
         tools = []
         for tmp, clr, name in keepout_bodies(stack_data, target):
@@ -664,6 +613,159 @@ def _dump_debug(stack_data, user_materials, frame, raw, bounds, log):
         log("Debug dump skipped (%s)" % e)
 
 
+def _zone_entries(entries, zone):
+    """Stations of a loft inside a span zone, plus the first one beyond each
+    interior boundary, so the loft runs through the centre and is cut there."""
+    if zone is None:
+        return entries
+    z0, z1 = zone
+    inside = [i for i, (s, _l) in enumerate(entries) if z0 <= s <= z1]
+    if not inside:
+        return []
+    i0, i1 = inside[0], inside[-1]
+    if z0 > -1e8 and i0 > 0:
+        i0 -= 1
+    if z1 < 1e8 and i1 < len(entries) - 1:
+        i1 += 1
+    return entries[i0:i1 + 1]
+
+
+def _build_zone(ctx, zone):
+    """Plies, fills, core and external layers for one span zone (None = all).
+    Returns pending (transient body, name, role, info, material), trimmed to the zone."""
+    b, stack, native, plan = ctx["b"], ctx["stack"], ctx["native"], ctx["plan"]
+    sections, frame, bounds = ctx["sections"], ctx["frame"], ctx["bounds"]
+    step, thickness_span = ctx["step"], ctx["thickness_span"]
+    log, progress, skipped = ctx["log"], ctx["progress"], ctx["skipped"]
+    side = "" if zone is None else (" (left)" if zone[0] < 0 else " (right)")
+
+    def zp(key):
+        return _zone_entries(plan[key], zone)
+
+    zsecs = [sec for _s, sec in _zone_entries([(sec.s, sec) for sec in sections], zone)]
+    tips = (True, True) if zone is None else (zone[0] < -1e8, zone[1] > 1e8)
+    pending = []
+    n_rows = len(stack.units)
+    cur = b.copy(native)
+    for ri, row in enumerate(stack.units):
+        progress("Layer %d/%d: %s" % (ri + 1, n_rows, row.name), ri, n_rows + 2)
+        label = "FL%02d %s" % (ri + 1, row.name)
+        info = {"row": row.id, "name": row.name, "material": row.material["id"],
+                "angles": [p.angle for p in row.plies], "t": row.t}
+        if cur is None:
+            log("Layer '%s' has no room left; skipped" % row.name)
+            continue
+        inset = step * (ri + 1)  # each inner surface ends a little inside the one above
+        after = b.loft(zp("after:%s" % row.id), "FL S%d" % (ri + 1), inset, tips)
+        # tools: the inner surface to cut out, and the masks limiting this ply
+        slot = fill = None
+        errors = []
+        try:
+            if row.is_full:
+                inner = after
+            else:
+                inner = b.loft(zp("full:%s" % row.id), "FL F%d" % (ri + 1), inset, tips)
+            mask = None
+            if row.side != "wrap":
+                quads = [(sec.s, engine.side_mask_quads(sec, row.side, sec.chord + BIG_EXTEND))
+                         for sec in zsecs]
+                mask = b.loft_polys(quads, "FL side mask %d" % (ri + 1))
+            region = (_region_tool(b, row, sections, frame, bounds, thickness_span, ri)
+                      if row.has_region else None)
+        except FusionError as e:
+            log("WARNING: %s%s could not be built and was skipped (tools: %s)" % (label, side, e))
+            skipped.append(label + side)
+            cur = after
+            continue
+        # Limits first on a fresh copy of the surface above, then the cut, is the
+        # gentlest order for the kernel; the other order is the fallback.
+        for order in ("limits first", "cut first"):
+            try:
+                slot, fill = _ply_body(b, cur, inner, mask, region, bool(row.outside), order, label, row.side)
+                break
+            except FusionError as e:
+                errors.append("%s: %s" % (order, e))
+                slot = fill = None
+        if slot is None:
+            log("WARNING: %s%s could not be built and was skipped (%s)" % (label, side, "; ".join(errors)))
+            skipped.append(label + side)
+            cur = after
+            continue
+        if _has_volume(slot):
+            pending.append((slot, label, "ply", info, row.material))
+        else:
+            log("Layer '%s' came out empty" % row.name)
+        if fill is not None and _has_volume(fill):
+            if row.outside == "core":
+                pending.append((fill, "%s fill (core)" % label, "corefill", info, stack.core_material))
+            else:
+                m = stack.materials[row.outside]
+                pending.append((fill, "%s fill %s" % (label, m["name"]), "fill",
+                                dict(info, material=m["id"]), m))
+        cur = after
+    # core, with any 'core' fills joined in
+    if cur is not None and _has_volume(cur):
+        for p in [p for p in pending if p[2] == "corefill"]:
+            try:
+                b.boolean(cur, p[0], "union", "core + %s" % p[1])
+                pending.remove(p)
+            except FusionError as e:
+                log("Could not join %s into the core (%s); kept separate" % (p[1], e))
+        pending.append((cur, stack.core_name, "core", {"material": stack.core_material["id"]},
+                        stack.core_material))
+    # external layers: ext_k = E_k - E_{k-1}, E_0 = the original body
+    prev = b.copy(native)
+    for ri, row in enumerate(stack.ext_units):
+        progress("External %d/%d: %s" % (ri + 1, len(stack.ext_units), row.name), n_rows, n_rows + 2)
+        # outer layers end slightly inside the layer below so it cuts cleanly through
+        outer = b.loft(zp("ext:%s" % row.id), "FL E%d" % (ri + 1), step * (ri + 1), tips)
+        if outer is None:
+            continue
+        keep_outer = b.copy(outer)
+        b.boolean(outer, prev, "cut", "FX%02d %s" % (ri + 1, row.name))
+        pending.append((outer, "FX%02d %s" % (ri + 1, row.name), "external",
+                        {"row": row.id, "name": row.name, "material": row.material["id"]}, row.material))
+        prev = keep_outer
+    if zone is not None:
+        box = b.span_box(zone[0], zone[1])
+        kept = []
+        for item in pending:
+            try:
+                b.boolean(item[0], box, "intersect", "%s: trim to%s" % (item[1], side))
+                if _has_volume(item[0]):
+                    kept.append(item)
+            except FusionError as e:
+                log("WARNING: %s%s could not be trimmed at the centre (%s)" % (item[1], side, e))
+        pending = kept
+    return pending
+
+
+def _join_halves(b, halves, log):
+    """Join left/right bodies of the same name; keep both if a join fails."""
+    left, right = halves
+    rmap = {}
+    for item in right:
+        rmap.setdefault(item[1], []).append(item)
+    out = []
+    for item in left:
+        mates = rmap.get(item[1])
+        if mates:
+            other = mates.pop(0)
+            try:
+                b.boolean(item[0], other[0], "union", "%s: join halves" % item[1])
+                out.append(item)
+                continue
+            except FusionError as e:
+                log("%s: halves kept as separate bodies (%s)" % (item[1], e))
+                out.append((item[0], item[1] + " L") + tuple(item[2:]))
+                out.append((other[0], other[1] + " R") + tuple(other[2:]))
+                continue
+        out.append(item)
+    for items in rmap.values():
+        out.extend(items)
+    return out
+
+
 def _ply_body(b, outer, inner, mask, region, with_fill, order, label, side):
     """Ply body = (outer surface - inner surface) limited by the side mask and
     region; fill = the same slot outside the region. Works on copies so a
@@ -693,13 +795,15 @@ def _ply_body(b, outer, inner, mask, region, with_fill, order, label, side):
     return body, fill
 
 
-def _shift_ends(run, inset):
+def _shift_ends(run, inset, lo=True, hi=True):
     """Move the first and last (s, loop) stations inward by inset mm (outward if negative)."""
     if not inset or len(run) < 2:
         return run
     run = list(run)
-    run[0] = (run[0][0] + inset, run[0][1])
-    run[-1] = (run[-1][0] - inset, run[-1][1])
+    if lo:
+        run[0] = (run[0][0] + inset, run[0][1])
+    if hi:
+        run[-1] = (run[-1][0] - inset, run[-1][1])
     return run
 
 

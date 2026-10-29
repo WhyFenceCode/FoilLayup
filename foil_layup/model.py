@@ -19,6 +19,8 @@ DEFAULT_SETTINGS = {
     "analysisPoints": 200,  # points used for thickness / medial analysis
     "dropRatio": 20.0,      # ply drop ramp length = ratio x row thickness
     "minGap": 0.15,         # mm: minimum half-thickness kept inside an inner surface
+    "chordRefSmoothing": 0.05,  # chord limits use LE/TE smoothed over this share of
+                                # the span, so a centre hub does not drag bands sideways
     "plyEndRatio": 1.0,     # inner plies stop where the space inside the layers above
                             # them is less than ratio x ply thickness (no feather edges)
     "tipInset": 0.4,        # mm: first/last station inset from the body ends
@@ -201,6 +203,8 @@ class Section:
         self.cum = geom.cumulative_lengths(closed)  # cum[j] = arc from TE over the top
         self.length = self.cum[-1]
         # largest inscribed circle ~ max thickness (LE excluded: its ball is the LE radius)
+        # reference LE/TE (planform c) for chord limits; see smooth_chord_reference
+        self.ref_le, self.ref_te = le[0], te[0]
         self.thickness = 2.0 * max(self.h[j] for j in range(self.m) if 0.05 < self.x[j] < 0.95)
 
     def arc(self, j):
@@ -260,7 +264,7 @@ def region_field(row, sec, frame, bounds, chord_at=None):
                 f = min(f, s1 - sr)
         if row.chord:
             c0, c1 = row.chord
-            x = sec.x[j]
+            x = (sec.pts[j][0] - sec.ref_le) / (sec.ref_te - sec.ref_le)
             if c0 is not None and c0 > 0:
                 f = min(f, (x - c0) * sec.chord)
             if c1 is not None and c1 < 1:
@@ -286,6 +290,46 @@ def row_fields(row, sec, frame, bounds):
     return fs, fr, presence
 
 
+def _smoothstep(x):
+    """S-shaped 0..1 ramp: ply drops taper without creases at either end."""
+    x = min(1.0, max(0.0, x))
+    return x * x * (3.0 - 2.0 * x)
+
+
+def smooth_chord_reference(sections, fraction):
+    """Set sec.ref_le / sec.ref_te: the LE/TE planform positions smoothed along
+    the span (Gaussian, sigma = fraction x span, weighted by station spacing so
+    densely sampled hubs do not dominate), never wider than the real section.
+    Chord-% limits then follow the main wing through a hub or pod instead of
+    jumping sideways with the local fairing."""
+    n = len(sections)
+    if n < 3 or fraction <= 0:
+        return
+    span = sections[-1].s - sections[0].s
+    sigma = max(fraction * span, 1e-6)
+    wts = []
+    for i in range(n):
+        a = sections[max(i - 1, 0)].s
+        b = sections[min(i + 1, n - 1)].s
+        wts.append(max(b - a, 1e-6) / 2.0)
+    le = [sec.le_pt[0] for sec in sections]
+    te = [sec.te_pt[0] for sec in sections]
+    for i, sec in enumerate(sections):
+        sw = sl = st = 0.0
+        for k in range(n):
+            w = wts[k] * math.exp(-0.5 * ((sections[k].s - sec.s) / sigma) ** 2)
+            sw += w
+            sl += w * le[k]
+            st += w * te[k]
+        rl, rt = sl / sw, st / sw
+        lo, hi = min(le[i], te[i]), max(le[i], te[i])
+        rl = min(max(rl, lo), hi)
+        rt = min(max(rt, lo), hi)
+        if abs(rt - rl) < 0.2 * abs(te[i] - le[i]):  # degenerate: keep the local chord
+            rl, rt = le[i], te[i]
+        sec.ref_le, sec.ref_te = rl, rt
+
+
 def section_depths(sec, rows, frame, bounds, ramp_ratio):
     """Depth fields for each row at one section.
 
@@ -303,7 +347,7 @@ def section_depths(sec, rows, frame, bounds, ramp_ratio):
         if presence is None:
             a = [1.0] * sec.m
         else:
-            a = [1.0 if f >= 0 else max(0.0, 1.0 + f / ramp) for f in presence]
+            a = [1.0 if f >= 0 else _smoothstep(1.0 + f / ramp) for f in presence]
         after = [D[j] + row.t * a[j] for j in range(sec.m)]
         out.append({
             "row": row,

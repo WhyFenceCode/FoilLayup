@@ -49,6 +49,7 @@
         <label>Ply drop ramp (length : thickness) <input type="number" data-set="dropRatio" min="1" step="any"></label>
         <label>Min inner gap (mm) <input type="number" data-set="minGap" min="0.01" step="any"></label>
         <label title="An inner ply stops where the space left inside the layers above it is thinner than this many times its own thickness; the outer layers carry on to the edge.">Ply stop: end each inner ply where space &lt; &times; its thickness <input type="number" data-set="plyEndRatio" min="0" step="0.1"></label>
+        <label title="Chord-% limits are measured against the leading/trailing edge smoothed along the span by this share of the span, so a centre hub or pod does not drag spar caps sideways. 0 = local chord.">Chord-% reference smoothing (share of span) <input type="number" data-set="chordRefSmoothing" min="0" max="0.5" step="0.01"></label>
         <label>Tip inset (mm) <input type="number" data-set="tipInset" min="0.05" step="any"></label>
         <label class="chk"><input type="checkbox" data-set="hideOriginal"> Hide original body after Generate</label>
       </div>

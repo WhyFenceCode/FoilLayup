@@ -6,8 +6,9 @@ geometry, seams and flat patterns happens here.
 from . import flatten, geom, model, seams
 
 
-def build_sections(raw, m):
-    """raw: list of (s, loop2d). Returns Section objects (skips degenerate)."""
+def build_sections(raw, m, chord_smoothing=0.05):
+    """raw: list of (s, loop2d). Returns Section objects (skips degenerate),
+    with the smoothed chord reference used by chord-% limits."""
     out = []
     for s, loop in raw:
         if loop is None or len(loop) < 8:
@@ -16,6 +17,7 @@ def build_sections(raw, m):
             out.append(model.Section(s, loop, m))
         except (ValueError, ZeroDivisionError):
             continue
+    model.smooth_chord_reference(out, chord_smoothing)
     return out
 
 
@@ -181,7 +183,7 @@ def region_planform_polys(row, sections, frame, extend):
             continue
         fwd, aft = [], []
         for sec in run:
-            cle, cte = sec.le_pt[0], sec.te_pt[0]
+            cle, cte = sec.ref_le, sec.ref_te
             cf = cle + (c0 if c0 not in (None,) and c0 > 0 else 0) * (cte - cle)
             ca = cle + (c1 if c1 not in (None,) and c1 < 1 else 1) * (cte - cle)
             if c0 is None or c0 <= 0:

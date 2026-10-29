@@ -146,7 +146,7 @@ def _analyze(stack_data):
     n = max(12, min(40, int(stack.settings["loftStations"])))
     raw = fusion_geo.sample_sections(native, frame, n, float(stack.settings["tipInset"]),
                                      model.span_limit_stations(stack, frame))
-    sections = engine.build_sections(raw, 120)
+    sections = engine.build_sections(raw, 120, float(stack.settings["chordRefSmoothing"]))
     bounds = fusion_geo.load_bounds(stack.bound_sketches, frame, log)
     stations = [{"s": sec.s, "chord": sec.chord, "thickness": sec.thickness,
                  "le": sec.le_pt[0], "te": sec.te_pt[0]} for sec in sections]
