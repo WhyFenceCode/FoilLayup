@@ -29,6 +29,7 @@ LIBRARY_FILE = os.path.join(DATA_DIR, "library.json")
 LOG_FILE = os.path.join(DATA_DIR, "log.txt")
 
 _handlers = []
+_SPAN_CACHE = {}  # span sections for previews, keyed by body + frame + resolution
 _pending = {}  # job queued for the run command
 
 
@@ -148,7 +149,7 @@ def _analyze(stack_data):
                                      model.span_limit_stations(stack, frame))
     sections = engine.build_sections(raw, 120, float(stack.settings["chordRefSmoothing"]))
     bounds = fusion_geo.load_bounds(stack.bound_sketches, frame, log)
-    engine.log_tip_schedule(engine.tip_schedule(stack, sections, frame), frame, log)
+    engine.log_tip_schedule(engine.tip_schedule(stack, sections, frame, bounds), frame, log)
     stations = [{"s": sec.s, "chord": sec.chord, "thickness": sec.thickness,
                  "le": sec.le_pt[0], "te": sec.te_pt[0]} for sec in sections]
     seams_out = []
@@ -198,8 +199,21 @@ def _preview(stack_data, s):
     loop = fusion_geo.raw_section(native, frame, s)
     if not loop:
         return {"error": "No section at s=%.1f" % s}
-    sec = model.Section(s, loop, int(stack.settings["analysisPoints"]))
+    st = stack.settings
+    m = int(st["loftPoints"])
+    sec = model.Section(s, loop, m)
+    # the whole-span sections are needed for the tip drop schedule and the
+    # smoothed chord reference; they only change with the body or the frame
+    key = (stack_data["target"]["token"], json.dumps(stack_data.get("frame") or {}, sort_keys=True),
+           int(st["loftStations"]), float(st["tipInset"]), m)
+    if _SPAN_CACHE.get("key") != key:
+        raw = fusion_geo.sample_sections(native, frame, int(st["loftStations"]), float(st["tipInset"]))
+        _SPAN_CACHE.update(key=key, sections=engine.build_sections(raw, m, 0.0))
+    span = [x for x in _SPAN_CACHE["sections"] if abs(x.s - s) > 0.05] + [sec]
+    span.sort(key=lambda x: x.s)
+    model.smooth_chord_reference(span, float(st["chordRefSmoothing"]))
     bounds = fusion_geo.load_bounds(stack.bound_sketches, frame)
+    engine.tip_schedule(stack, span, frame, bounds)
     return engine.section_preview(stack, sec, frame, bounds)
 
 

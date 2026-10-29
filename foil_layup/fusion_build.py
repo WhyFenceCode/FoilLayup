@@ -524,7 +524,7 @@ def generate(stack_data, user_materials, log, progress):
     frame["bbox_local"] = (lo, hi)
     bounds = load_bounds(stack.bound_sketches, frame, log)
     _dump_debug(stack_data, user_materials, frame, raw, bounds, log)
-    engine.log_tip_schedule(engine.tip_schedule(stack, sections, frame), frame, log)
+    engine.log_tip_schedule(engine.tip_schedule(stack, sections, frame, bounds), frame, log)
     deps, ext = engine.depth_tables(stack, sections, frame, bounds)
     plan = engine.loft_plan(stack, sections, deps, ext, float(st["minGap"]))
     pieces, _d, _e = engine.plan_pieces(stack, sections, frame, bounds, log, stack_data.get("seamPlan"))

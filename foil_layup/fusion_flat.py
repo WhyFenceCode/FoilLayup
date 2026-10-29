@@ -44,7 +44,7 @@ def flatten(stack_data, user_materials, folder, make_sketches, log, progress):
     if len(sections) < 3:
         raise FusionError("Could not slice the body; check the span axis.")
     bounds = load_bounds(stack.bound_sketches, frame, log)
-    engine.log_tip_schedule(engine.tip_schedule(stack, sections, frame), frame, log)
+    engine.log_tip_schedule(engine.tip_schedule(stack, sections, frame, bounds), frame, log)
 
     kos = _generated_keepout_tools(comp)
     if not kos and stack_data.get("keepouts"):

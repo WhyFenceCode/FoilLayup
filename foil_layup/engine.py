@@ -21,15 +21,18 @@ def build_sections(raw, m, chord_smoothing=0.05):
     return out
 
 
-def tip_schedule(stack, sections, frame):
+def tip_schedule(stack, sections, frame, bounds=None, zone=(0.1, 0.75)):
     """Spanwise ply drops towards the tips.
 
-    Walking out from the root, the thicker side's stack plus half the minimum
-    core (tipCoreMin) must fit in the foil's half thickness. When it no longer
-    does, plies end in this order: limited plies (spar caps, bands, one-sided)
-    innermost first, then the other inner plies innermost first. The outermost
-    ply never drops; it runs to the tip. Sets unit.tip_end (span_ref) and
-    returns [(unit, end)] in drop order.
+    Walking out from the root, at every point across the structural part of
+    the chord (zone, as chord fractions) the stack actually present there
+    (each ply's band, side and bound respected) plus half the minimum core
+    (tipCoreMin) must fit in the local half thickness. Where it does not, the
+    first ply in the drop order that covers that point ends: limited plies
+    (spar caps, bands, one-sided) innermost first, then the other inner plies
+    innermost first. The outermost ply never drops. The end is interpolated
+    between stations from the remaining clearance. Sets unit.tip_end
+    (span_ref) and returns [(unit, end)] in drop order.
     """
     st = stack.settings
     units = stack.units
@@ -37,37 +40,71 @@ def tip_schedule(stack, sections, frame):
         u.tip_end = None
     if not st.get("tipSchedule", True) or len(units) < 2 or len(sections) < 2:
         return []
+    bounds = bounds or {}
     core_half = float(st.get("tipCoreMin", 1.0)) / 2.0
-    pts = sorted((model.span_ref(sec.s, frame), sec.thickness / 2.0) for sec in sections)
-    merged = []
-    for sr, hv in pts:
-        if merged and sr - merged[-1][0] < 0.5:
-            merged[-1] = (merged[-1][0], min(merged[-1][1], hv))  # both halves must fit
-        else:
-            merged.append((sr, hv))
     limited = [u for u in units[1:] if u.has_user_region or u.side != "wrap"]
     others = [u for u in units[1:] if u not in limited]
     order = list(reversed(limited)) + list(reversed(others))
+
+    # per station: zone vertices, their half thickness and which plies cover them
+    # Checked points: wherever a limited ply (cap, band, one-sided) lies, and
+    # the thickest point of each surface. Thin regions towards the LE/TE are
+    # left to the chordwise ply stop rule, they must not end plies spanwise.
+    stations = []
+    for sec in sections:
+        zone_js = [j for j in range(sec.m) if zone[0] <= sec.x[j] <= zone[1]]
+        if not zone_js:
+            continue
+        pres = {}
+        for u in units:
+            _fs, _fr, presence = model.row_fields(u, sec, frame, bounds)
+            pres[u.id] = presence
+        js = set()
+        for u in limited:
+            p_ = pres[u.id]
+            js.update(j for j in zone_js if p_ is None or p_[j] >= 0)
+        top = [j for j in zone_js if j < sec.le]
+        bot = [j for j in zone_js if j > sec.le]
+        for side_js in (top, bot):
+            if side_js:
+                js.add(max(side_js, key=lambda j: sec.h[j]))
+        js = sorted(js)
+        cover = {u.id: [pres[u.id] is None or pres[u.id][j] >= 0 for j in js] for u in units}
+        stations.append((model.span_ref(sec.s, frame), [sec.h[j] for j in js], cover))
+    stations.sort(key=lambda x: x[0])
+
+    def margins(station, present):
+        """Clearance per zone vertex (half thickness - stack - half core)."""
+        _sr, hs, cover = station
+        out = []
+        for k, hk in enumerate(hs):
+            depth = sum(u.t for u in present if cover[u.id][k])
+            out.append(hk - depth - core_half)
+        return out
+
     present = list(units)
-
-    def need():
-        top = sum(u.t for u in present if u.side in ("wrap", "top"))
-        bot = sum(u.t for u in present if u.side in ("wrap", "bottom"))
-        return max(top, bot) + core_half
-
     ends = []
-    room = float("inf")
-    for (s0, h0), (s1, h1) in zip(merged, merged[1:]):
-        n = max(1, int((s1 - s0) / 1.0))  # 1 mm steps
-        for k in range(n + 1):
-            t = k / n
-            sr = s0 + (s1 - s0) * t
-            room = min(room, h0 + (h1 - h0) * t)  # thickness only ever shrinks outward
-            while order and need() > room:
-                u = order.pop(0)
-                present.remove(u)
-                u.tip_end = sr
-                ends.append((u, sr))
+    prev = None
+    for station in stations:
+        while order:
+            m1 = margins(station, present)
+            worst = min(range(len(m1)), key=lambda k: m1[k])
+            if m1[worst] >= 0:
+                break
+            cover = station[2]
+            u = next((v for v in order if cover[v.id][worst]), None)
+            if u is None:
+                break  # only the outermost ply is left at that point
+            order.remove(u)
+            end = station[0]
+            if prev is not None:
+                m0 = min(margins(prev, present))
+                if m0 > 0:  # interpolate where the clearance ran out
+                    end = prev[0] + (station[0] - prev[0]) * m0 / (m0 - m1[worst])
+            present.remove(u)
+            u.tip_end = end
+            ends.append((u, end))
+        prev = station
     return ends
 
 
@@ -275,24 +312,29 @@ def region_planform_polys(row, sections, frame, extend, include_tip=True):
 
 # --------------------------------------------------------------------------- previews
 def section_preview(stack, sec, frame, bounds):
-    """Loops for drawing one section in the palette."""
-    deps = model.section_depths(sec, stack.units, frame, bounds, float(stack.settings["dropRatio"]))
-    ext = model.external_depths(sec, stack.ext_units)
+    """Loops for drawing one section in the palette, built exactly like the
+    loft plan (same trimming, nesting and tip ends). Call tip_schedule on the
+    span sections first so plies that have ended here are shown as ended."""
+    deps = [model.section_depths(sec, stack.units, frame, bounds, float(stack.settings["dropRatio"]))]
+    ext = [model.external_depths(sec, stack.ext_units)]
     mg = float(stack.settings["minGap"])
-    rows = stack.units
+    plan = loft_plan(stack, [sec], deps, ext, mg)
+    sr = model.span_ref(sec.s, frame)
     out = {"s": sec.s, "outer": sec.pts, "chord": sec.chord, "thickness": sec.thickness, "rows": [], "ext": []}
-    for rd in deps:
+    for rd in deps[0]:
         row = rd["row"]
+        ended = row.tip_end is not None and sr > row.tip_end
         out["rows"].append({
             "id": row.id,
-            "name": row.name,
+            "name": row.name + (" (ended at %.0f)" % row.tip_end if ended else ""),
             "color": row.material["color"],
-            "after": boundary_loop(sec, rd["after"], _next_gap(stack, rows, row, mg)),
+            "after": plan["after:%s" % row.id][0][1],
             "presence": rd["presence"],
+            "ended": ended,
         })
-    for rd in ext:
-        out["ext"].append({"id": rd["row"].id, "name": rd["row"].name, "color": rd["row"].material["color"],
-                           "after": boundary_loop(sec, rd["after"], mg)})
+    for row in stack.ext_units:
+        out["ext"].append({"id": row.id, "name": row.name, "color": row.material["color"],
+                           "after": plan["ext:%s" % row.id][0][1]})
     return out
 
 

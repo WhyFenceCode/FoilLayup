@@ -604,13 +604,16 @@ function drawPreview() {
     if (e.after) svg += `<path d="${d(e.after)}" fill="${esc(e.color)}" stroke="#0005" stroke-width="0.4"/>`;
     legend.push([e.color, "ext: " + e.name]);
   }
-  const cols = rowColours(p.rows);
+  // plies that ended before this station (tip drops) are not drawn
+  const live = p.rows.filter((r) => !r.ended);
+  const cols = rowColours(live);
   svg += `<path d="${d(p.outer)}" fill="${esc(cols.length ? cols[0] : coreColor())}" stroke="#000" stroke-width="0.6"/>`;
-  p.rows.forEach((r, i) => {
+  live.forEach((r, i) => {
     const next = i + 1 < cols.length ? cols[i + 1] : coreColor();
     if (r.after) svg += `<path d="${d(r.after)}" fill="${esc(next)}" stroke="#0006" stroke-width="0.4"/>`;
     legend.push([cols[i], r.name]);
   });
+  p.rows.filter((r) => r.ended).forEach((r) => legend.push(["transparent", r.name]));
   legend.push([coreColor(), "core"]);
   svg += "</g></svg>";
   el.innerHTML = svg;
