@@ -44,6 +44,7 @@
     <div class="card">
       <h3>Geometry resolution</h3>
       <div class="fields">
+        <label title="Offset: every inner surface is an exact Fusion offset of the one above (robust with hubs and fillets; ply drops are vertical steps). Loft: surfaces lofted through computed sections (smooth ply-drop ramps, but fragile on complex wings).">3D method <select data-set="construction"><option value="offset">offset (recommended)</option><option value="loft">loft through sections</option></select></label>
         <label>Loft stations <input type="number" data-set="loftStations" min="8" max="150"></label>
         <label>Loft points / section <input type="number" data-set="loftPoints" min="40" max="400" step="2"></label>
         <label>Ply drop ramp (length : thickness) <input type="number" data-set="dropRatio" min="1" step="any"></label>

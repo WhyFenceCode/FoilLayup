@@ -318,6 +318,26 @@ class Builder:
             raise FusionError("%s (%s) failed" % (what or "boolean", op))
         return target
 
+    def offset(self, tmp, mm, what=""):
+        """Transient copy of tmp with every face offset by mm (+ out, - in),
+        using Fusion's own offset (exact, handles hubs and fillets)."""
+        real = self.materialize(tmp, "FL offset")
+        faces = [real.faces.item(i) for i in range(real.faces.count)]
+        inp = self.comp.features.offsetFacesFeatures.createInput(
+            faces, adsk.core.ValueInput.createByReal(mm * CM))
+        if self.base:
+            inp.targetBaseFeature = self.base
+        try:
+            self.comp.features.offsetFacesFeatures.add(inp)
+        except RuntimeError as e:
+            try:
+                real.deleteMe()
+            except Exception:
+                pass
+            msg = str(e).splitlines()[0] if str(e) else "offset failed"
+            raise FusionError("%s (offset %.3f mm): %s" % (what or "offset", mm, msg))
+        return self._to_temp([real])[0]
+
     def grow(self, tmp, mm):
         """Transient copy of tmp offset outward by mm (via an offset-faces feature)."""
         if mm <= 0:
@@ -513,7 +533,9 @@ def generate(stack_data, user_materials, log, progress):
         ctx = dict(b=b, stack=stack, native=native, plan=plan, sections=sections, frame=frame,
                    bounds=bounds, step=step, thickness_span=thickness_span, log=log,
                    progress=progress, skipped=skipped)
-        if frame.get("symmetric", True) and sections[0].s < 0 < sections[-1].s:
+        if st.get("construction", "offset") == "offset":
+            pending = _build_offsets(ctx)
+        elif frame.get("symmetric", True) and sections[0].s < 0 < sections[-1].s:
             # One smooth loft through a whole symmetric wing (hub included) is
             # fragile; each half is built on its own and joined at the centre plane.
             halves = []
@@ -611,6 +633,125 @@ def _dump_debug(stack_data, user_materials, frame, raw, bounds, log):
             json.dump(data, f)
     except Exception as e:
         log("Debug dump skipped (%s)" % e)
+
+
+def _stop_prism(b, entries, depth, name):
+    """Vertical prism over the planform where a surface exists: from far ahead
+    of the LE back to its trimmed tip at each station, spanning the stations
+    where it exists. Cutting the surface above with it before offsetting
+    removes the regions too thin for the next ply, so the offset never fails
+    there and the ply ends bluntly at this line."""
+    present = [(s_, loop) for s_, loop in entries if loop is not None]
+    if len(present) < 2:
+        return None
+    front = min(min(p[0] for p in loop) for _s, loop in present) - BIG_EXTEND
+    aft = [(s_, max(p[0] for p in loop)) for s_, loop in present]
+    poly = aft + [(present[-1][0], front), (present[0][0], front)]
+    return b.extrude_planform([poly], name, depth)
+
+
+def _build_offsets(ctx):
+    """Plies, fills, core and external layers built from exact offsets of the
+    body (no lofted surfaces). Returns pending (transient, name, role, info, material)."""
+    b, stack, native, plan = ctx["b"], ctx["stack"], ctx["native"], ctx["plan"]
+    sections, frame, bounds = ctx["sections"], ctx["frame"], ctx["bounds"]
+    thickness_span = ctx["thickness_span"]
+    log, progress, skipped = ctx["log"], ctx["progress"], ctx["skipped"]
+    pending = []
+    n_rows = len(stack.units)
+    cur = b.copy(native)
+    for ri, row in enumerate(stack.units):
+        progress("Layer %d/%d: %s" % (ri + 1, n_rows, row.name), ri, n_rows + 2)
+        label = "FL%02d %s" % (ri + 1, row.name)
+        info = {"row": row.id, "name": row.name, "material": row.material["id"],
+                "angles": [p.angle for p in row.plies], "t": row.t}
+        if cur is None:
+            log("Layer '%s' has no room left; skipped" % row.name)
+            continue
+        key = "full:%s" % row.id if ("full:%s" % row.id) in plan else "after:%s" % row.id
+        try:
+            prism = _stop_prism(b, plan[key], thickness_span, "FL stop %d" % (ri + 1))
+            inner = None
+            if prism is not None:
+                base_ = b.copy(cur)
+                b.boolean(base_, prism, "intersect", "%s: trim where the next ply no longer fits" % label)
+                inner = b.offset(base_, -row.t, "%s: inner surface" % label)
+            mask = None
+            if row.side != "wrap":
+                quads = [(sec.s, engine.side_mask_quads(sec, row.side, sec.chord + BIG_EXTEND))
+                         for sec in sections]
+                mask = b.loft_polys(quads, "FL side mask %d" % (ri + 1))
+            region = (_region_tool(b, row, sections, frame, bounds, thickness_span, ri)
+                      if row.has_region else None)
+        except FusionError as e:
+            log("WARNING: %s could not be built and was skipped (%s)" % (label, e))
+            skipped.append(label)
+            continue
+        slot = fill = None
+        errors = []
+        for order in ("limits first", "cut first"):
+            try:
+                slot, fill = _ply_body(b, cur, inner, mask, region, bool(row.outside), order, label, row.side)
+                break
+            except FusionError as e:
+                errors.append("%s: %s" % (order, e))
+                slot = fill = None
+        if slot is None:
+            log("WARNING: %s could not be built and was skipped (%s)" % (label, "; ".join(errors)))
+            skipped.append(label)
+            continue
+        if _has_volume(slot):
+            pending.append((slot, label, "ply", info, row.material))
+        else:
+            log("Layer '%s' came out empty" % row.name)
+        if fill is not None and _has_volume(fill):
+            if row.outside == "core":
+                pending.append((fill, "%s fill (core)" % label, "corefill", info, stack.core_material))
+            else:
+                m = stack.materials[row.outside]
+                pending.append((fill, "%s fill %s" % (label, m["name"]), "fill",
+                                dict(info, material=m["id"]), m))
+        # the next surface: where this ply (or its fill) sits the inner surface,
+        # elsewhere the inner layers move outward over the step
+        if inner is None:
+            cur = None
+        elif row.is_full or row.outside:
+            cur = inner
+        else:
+            nxt = b.copy(cur)
+            try:
+                if _has_volume(slot):
+                    b.boolean(nxt, slot, "cut", "%s: surface for the next ply" % label)
+                cur = nxt
+            except FusionError as e:
+                log("WARNING: %s: inner layers cannot follow its edges (%s); "
+                    "using the full-depth surface" % (label, e))
+                cur = inner
+    if cur is not None and _has_volume(cur):
+        for p in [p for p in pending if p[2] == "corefill"]:
+            try:
+                b.boolean(cur, p[0], "union", "core + %s" % p[1])
+                pending.remove(p)
+            except FusionError as e:
+                log("Could not join %s into the core (%s); kept separate" % (p[1], e))
+        pending.append((cur, stack.core_name, "core", {"material": stack.core_material["id"]},
+                        stack.core_material))
+    prev = b.copy(native)
+    for ri, row in enumerate(stack.ext_units):
+        progress("External %d/%d: %s" % (ri + 1, len(stack.ext_units), row.name), n_rows, n_rows + 2)
+        name = "FX%02d %s" % (ri + 1, row.name)
+        try:
+            outer = b.offset(b.copy(prev), row.t, name)
+            keep_outer = b.copy(outer)
+            b.boolean(outer, prev, "cut", name)
+        except FusionError as e:
+            log("WARNING: %s could not be built and was skipped (%s)" % (name, e))
+            skipped.append(name)
+            continue
+        pending.append((outer, name, "external",
+                        {"row": row.id, "name": row.name, "material": row.material["id"]}, row.material))
+        prev = keep_outer
+    return pending
 
 
 def _zone_entries(entries, zone):

@@ -12,6 +12,7 @@ import math
 from . import geom
 
 DEFAULT_SETTINGS = {
+    "construction": "offset",  # 'offset': exact offsets of the body; 'loft': lofted sections
     "loftStations": 40,     # sections used to loft the 3D layer surfaces
     "loftPoints": 120,      # points per loft section
     "flatStations": 60,     # sections used for flat patterns
