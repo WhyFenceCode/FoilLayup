@@ -13,6 +13,7 @@ Body logic, from the outside in (S_k = lofted inner surface after row k):
 """
 import json
 import os
+import time
 
 import adsk.core
 import adsk.fusion
@@ -40,16 +41,44 @@ class Builder:
         self.progress = progress
         self.planes = []
         self.sketches = []
+        self._plane_cache = {}
+        self._delete_budget = 90.0   # s spent deleting helper sketches before leaving them hidden
+        self._delete_spent = 0.0
+        self._kept_sketches = False
         self.tbm = adsk.fusion.TemporaryBRepManager.get()
 
     # ------------------------------------------------------------------ helpers
     def _plane(self, s):
+        key = round(s, 4)
+        if key in self._plane_cache:   # one plane per station, shared by every surface
+            return self._plane_cache[key]
         inp = self.comp.constructionPlanes.createInput()
         inp.setByPlane(adsk.core.Plane.create(to_model(self.frame, s, 0, 0), vec(self.frame["S"])))
         pl = self.comp.constructionPlanes.add(inp)
         pl.isLightBulbOn = False
         self.planes.append(pl)
+        self._plane_cache[key] = pl
         return pl
+
+    def _drop_sketches(self, start):
+        """Delete helper sketches made since index start, within a time budget;
+        past it they stay hidden in the base feature (deleting thousands of
+        sketches one by one can take Fusion many minutes)."""
+        keep = []
+        for sk in self.sketches[start:]:
+            if self._delete_spent > self._delete_budget:
+                keep.append(sk)
+                continue
+            t0 = time.time()
+            try:
+                sk.deleteMe()
+            except Exception:
+                keep.append(sk)
+            self._delete_spent += time.time() - t0
+        if keep and not self._kept_sketches and self._delete_spent > self._delete_budget:
+            self._kept_sketches = True
+            self.log("Helper sketches are slow to delete; the rest are left hidden inside the base feature")
+        self.sketches[start:] = keep
 
     def _up_plane(self):
         inp = self.comp.constructionPlanes.createInput()
@@ -250,12 +279,20 @@ class Builder:
         run = engine.longest_run(entries)
         if len(run) < 2:
             return None
-        return self._robust_loft(_shift_ends(run, inset, *tips), self._spline_profile, name, inset, tips)
+        n0 = len(self.sketches)
+        try:
+            return self._robust_loft(_shift_ends(run, inset, *tips), self._spline_profile, name, inset, tips)
+        finally:
+            self._drop_sketches(n0)
 
     def loft_polys(self, entries, name, outset=1.0):
         """Transient solid lofted through straight-sided polygons (side masks),
         reaching outset mm past the end sections."""
-        return self._robust_loft(_shift_ends(list(entries), -outset), self._poly_profile, name)
+        n0 = len(self.sketches)
+        try:
+            return self._robust_loft(_shift_ends(list(entries), -outset), self._poly_profile, name)
+        finally:
+            self._drop_sketches(n0)
 
     def _polyline(self, sk, model_pts):
         lines = sk.sketchCurves.sketchLines
@@ -400,11 +437,7 @@ class Builder:
         return self.tbm.createBox(obb)
 
     def cleanup(self):
-        for sk in self.sketches:
-            try:
-                sk.deleteMe()
-            except Exception:
-                pass
+        self._drop_sketches(0)
         for pl in self.planes:
             try:
                 pl.deleteMe()
@@ -422,43 +455,54 @@ def _local(frame, pt):
 _APPEARANCE_CACHE = {}
 
 
+_SOURCE_APPEARANCE = {}
+
+
+def _source_appearance():
+    """A library appearance with a Color property to copy (looked up once)."""
+    if "src" in _SOURCE_APPEARANCE:
+        return _SOURCE_APPEARANCE["src"]
+    src = None
+    try:
+        libs = app().materialLibraries
+        for i in range(libs.count):
+            lib = libs.item(i)
+            if "Appearance" not in lib.name:
+                continue
+            for nm in ("Plastic - Matte (Yellow)", "Paint - Enamel Glossy (Yellow)", "Plastic - Glossy (Yellow)",
+                       "Plastic - Matte (White)", "Paint - Enamel Glossy (White)"):
+                src = lib.appearances.itemByName(nm)
+                if src:
+                    break
+            break
+    except Exception:
+        src = None
+    _SOURCE_APPEARANCE["src"] = src
+    return src
+
+
 def appearance_for(des, color_hex, name):
+    """Design appearance in this colour, or None (colouring is optional)."""
     key = color_hex
     if key in _APPEARANCE_CACHE:
+        ap = _APPEARANCE_CACHE[key]
         try:
-            if _APPEARANCE_CACHE[key].isValid:
-                return _APPEARANCE_CACHE[key]
+            if ap is None or ap.isValid:
+                return ap
         except Exception:
             pass
     aname = "FoilLayup %s" % color_hex
     ap = des.appearances.itemByName(aname)
     if ap is None:
-        lib = None
-        for i in range(app().materialLibraries.count):
-            l = app().materialLibraries.item(i)
-            if "Appearance" in l.name:
-                lib = l
-                break
-        if lib is None:
-            return None
-        src = None
-        for nm in ("Plastic - Matte (Yellow)", "Paint - Enamel Glossy (Yellow)", "Plastic - Glossy (Yellow)"):
-            src = lib.appearances.itemByName(nm)
-            if src:
-                break
+        src = _source_appearance()
         if src is None:
-            for i in range(lib.appearances.count):
-                a = lib.appearances.item(i)
-                if a.appearanceProperties.itemByName("Color"):
-                    src = a
-                    break
-        if src is None:
+            _APPEARANCE_CACHE[key] = None
             return None
         ap = des.appearances.addByCopy(src, aname)
-    prop = adsk.core.ColorProperty.cast(ap.appearanceProperties.itemByName("Color"))
-    if prop:
-        h = color_hex.lstrip("#")
-        prop.value = adsk.core.Color.create(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 0)
+        prop = adsk.core.ColorProperty.cast(ap.appearanceProperties.itemByName("Color"))
+        if prop:
+            h = color_hex.lstrip("#")
+            prop.value = adsk.core.Color.create(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 0)
     _APPEARANCE_CACHE[key] = ap
     return ap
 
@@ -512,6 +556,7 @@ def generate(stack_data, user_materials, log, progress):
     stack = model.Stack(stack_data, mats)
     st = stack.settings
 
+    t_start = time.time()
     remove_previous(des, log)
     target = adsk.fusion.BRepBody.cast(find_by_token(stack_data["target"]["token"]))
     native, comp, _inv = target_context(target)
@@ -581,21 +626,30 @@ def generate(stack_data, user_materials, log, progress):
                 except FusionError as e:
                     log("Keep-out %s did not cut %s (%s)" % (name, p[1], e))
             tools.append((tool, name, clr))
-        progress("Adding bodies", n_rows + 2, n_rows + 2)
-        for tmp, name, role, info, mat in pending:
+        log("Geometry built in %.0f s" % (time.time() - t_start))
+        t0 = time.time()
+        for k, (tmp, name, role, info, mat) in enumerate(pending):
+            progress("Adding body %d/%d: %s" % (k + 1, len(pending), name), k, len(pending))
             if _has_volume(tmp):
                 made.append((b.materialize(tmp, name), role, info, mat))
         for tool, name, clr in tools:
             real = b.materialize(tool, "FL keep-out %s" % name)
             real.isLightBulbOn = False
             tag(real, "keepout", {"name": name, "clearance": clr})
+        log("Bodies added in %.0f s" % (time.time() - t0))
     finally:
+        t0 = time.time()
+        progress("Removing helper sketches and planes", 0, 1)
         b.cleanup()
         if base:
+            progress("Finishing the base feature", 0, 1)
             base.finishEdit()
+        log("Clean-up and base feature finished in %.0f s" % (time.time() - t0))
 
     # appearance, tags
-    for body, role, info, mat in made:
+    t0 = time.time()
+    for k, (body, role, info, mat) in enumerate(made):
+        progress("Colouring and tagging bodies", k, len(made))
         try:
             ap = appearance_for(des, mat["color"], mat["name"])
             if ap:
@@ -610,6 +664,8 @@ def generate(stack_data, user_materials, log, progress):
         except Exception:
             pass
 
+    log("Colours and tags in %.0f s" % (time.time() - t0))
+    progress("Drawing seam lines", 0, 1)
     _seam_sketch(comp, frame, pieces, sections, log)
 
     if tl_start is not None and des.timeline.count - tl_start > 1:
@@ -620,7 +676,8 @@ def generate(stack_data, user_materials, log, progress):
             pass
 
     report = []
-    for body, role, info, mat in made:
+    for k, (body, role, info, mat) in enumerate(made):
+        progress("Measuring %d/%d" % (k + 1, len(made)), k, len(made))
         try:
             vol = body.physicalProperties.volume  # cm3
         except Exception:
