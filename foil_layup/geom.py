@@ -265,6 +265,9 @@ def ray_half_thickness(pts, normals, cap=1e6):
     return out
 
 
+NOSE_X = 0.08  # chord fraction treated as the nose (see offset_chains)
+
+
 def offset_chains(pts, normals, h, depth, trim, le):
     """Offset a CCW section (index 0 = TE, le = LE) inward by per-vertex depth
     and cut it where the layer runs out of room (h < trim).
@@ -286,16 +289,30 @@ def offset_chains(pts, normals, h, depth, trim, le):
 
     f = [(h[j] - trim[j]) if depth[j] > 0 else 1.0 for j in range(n)]
 
-    # first usable vertex on each side of the nose
+    # The nose zone (first NOSE_X of chord): a small nose radius can fail the
+    # room test there even though the ply simply wraps the nose; such failures
+    # never end a ply. Find the first vertex past the zone on each side.
+    te, lp = pts[0], pts[le]
+    ax, ay = te[0] - lp[0], te[1] - lp[1]
+    L2 = ax * ax + ay * ay or 1.0
+
+    def x_of(j):
+        return ((pts[j][0] - lp[0]) * ax + (pts[j][1] - lp[1]) * ay) / L2
+
     iu, il = le, le
-    while iu > 1 and f[iu] < 0:
+    while iu > 1 and x_of(iu - 1) < NOSE_X:
         iu -= 1
-    while il < n - 1 and f[il] < 0:
+    while il < n - 1 and x_of(il + 1) < NOSE_X:
+        il += 1
+    nose_fails = any(f[j] < 0 for j in range(iu, il + 1))
+    if iu > 1:
+        iu -= 1
+    if il < n - 1:
         il += 1
     if f[iu] < 0 or f[il] < 0:
-        return None
+        return None   # no room just behind the nose either: nothing fits here
 
-    if iu == le and il == le:
+    if not nose_fails:
         nose, ju, jl = P(le), le, le
     else:
         # raw offset polylines from the first usable vertex in to the nose
@@ -310,7 +327,7 @@ def offset_chains(pts, normals, h, depth, trim, le):
                     x = _seg_intersection(up_poly[a], up_poly[a + 1], lo_poly[b], lo_poly[b + 1])
                     best = (a + b, a, b, x)
         if best is None:
-            nose, ju, jl = lerp(P(iu), P(il), 0.5), iu, il
+            nose, ju, jl = P(le), le, le   # no fold: the offset passes the nose cleanly
         else:
             _k, a, b, nose = best
             ju, jl = iu + a, il - b
@@ -529,6 +546,24 @@ def signed_distance_polys(p, polys):
             inside = not inside
         dmin = _min_dist_poly(p[0], p[1], poly, dmin)
     return dmin if inside else -dmin
+
+
+def inset_polygon(poly, d):
+    """Move a closed polygon's edges inward by d mm (outward if negative),
+    vertex by vertex along the bisectors (fine for the gentle outlines of
+    bound sketches)."""
+    pts = orient_ccw(poly)
+    n = len(pts)
+    out = []
+    for i in range(n):
+        a, b, c = pts[i - 1], pts[i], pts[(i + 1) % n]
+        n1 = unit((-(b[1] - a[1]), b[0] - a[0]))   # left (inward) normals of the two edges
+        n2 = unit((-(c[1] - b[1]), c[0] - b[0]))
+        m = unit(add(n1, n2))
+        cosh = dot(m, n1)
+        k = d / cosh if abs(cosh) > 0.2 else d / 0.2
+        out.append((b[0] + m[0] * k, b[1] + m[1] * k))
+    return out
 
 
 def polys_bbox(polys):

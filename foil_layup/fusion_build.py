@@ -1128,13 +1128,17 @@ def _has_volume(tmp):
 
 
 def _region_tool(b, row, sections, frame, bounds, depth, ri, include_tip=True):
-    """Transient solid covering the row's chord/span limits and bound sketch."""
+    """Transient solid covering the row's span/chord limits and bound sketch,
+    with the user limits stepped in by row.edge_inset (tapered cap edges)."""
     polys = engine.region_planform_polys(row, sections, frame, BIG_EXTEND, include_tip)
     tool = b.extrude_planform(polys, "FL region %d" % (ri + 1), depth) if polys else None
     if row.bound_sketch:
         bp = bounds.get(row.bound_sketch) or []
         if not bp:
             raise FusionError("Bound sketch '%s' has no closed loops" % row.bound_sketch)
+        if row.edge_inset:
+            d = row.edge_inset if row.bound_mode != "outside" else -row.edge_inset
+            bp = [geom.inset_polygon(poly, d) for poly in bp]
         btool = b.extrude_planform(bp, "FL bound %d" % (ri + 1), depth,
                                    keep=lambda s, c: geom.signed_distance_polys((s, c), bp) > 0)
         if row.bound_mode == "outside":

@@ -423,6 +423,8 @@ function rowHtml(r, i, group) {
           ${matOptions(r.outsideMaterial, () => true)}</select></label>
       <label>Ply thickness override (mm)<input type="number" step="any" data-f="thickness" value="${r.thickness || ""}" placeholder="${m ? fmt(plyT({ material: r.material }), 3) : ""}"></label>
       <label title="Each ply of this layer stops where the space left inside the layers above it is thinner than this (half-thickness, mm). Empty = Setup's 'Inner ply end' x ply thickness.">Stop where space &lt; (mm, each ply)<input type="number" step="any" min="0" data-f="endGap" value="${r.endGap ?? ""}" placeholder="${fmt((S.stack.settings.plyEndRatio ?? 1) * plyT(r), 3)}"></label>
+      <label title="For a chord-limited layer with several plies: innermost ply width ÷ outermost. Empty = Setup value.">Cap taper (innermost ÷ outermost)<input type="number" step="0.05" min="0" max="1" data-f="taper" value="${r.taper ?? ""}" placeholder="${S.stack.settings.capTaper ?? 0.5}"></label>
+      <label title="For span/bound limits: each ply further in ends this much earlier (mm). Empty = Setup value.">Edge step per ply (mm)<input type="number" step="0.5" data-f="edgeStep" value="${r.edgeStep ?? ""}" placeholder="${S.stack.settings.capEdgeStep ?? 3}"></label>
       <label>Pattern splits at span (${S.units}; ";" separated)<input data-f="splits" value="${(r.splits || []).map((v) => toU(v)).join("; ")}" placeholder="e.g. 0; 250"></label>
       <label>Id<input data-f="id" value="${esc(r.id)}"></label>
     </div><p class="hint">Top/bottom layers sit on one side only and end at the LE/TE. Limits make a layer end early (ply drops ramp at ${S.stack.settings.dropRatio}:1). With "nothing", inner layers move outward to fill the gap; with a material or the core, the slot is filled so the inner layers stay put (e.g. spar caps with foam beside them).</p></td></tr>`;
@@ -482,6 +484,8 @@ function bindStack() {
         case "outsideMaterial": if (v) r.outsideMaterial = v; else delete r.outsideMaterial; break;
         case "thickness": if (v === "") delete r.thickness; else r.thickness = +v; break;
         case "endGap": if (v === "") delete r.endGap; else r.endGap = Math.max(0, +v); break;
+        case "taper": if (v === "") delete r.taper; else r.taper = Math.min(1, Math.max(0, +v)); break;
+        case "edgeStep": if (v === "") delete r.edgeStep; else r.edgeStep = +v; break;
         case "splits": r.splits = v.split(/[;,]/).map((x) => x.trim()).filter((x) => x !== "").map((x) => fromU(x)); if (!r.splits.length) delete r.splits; break;
         case "id": {
           const nv = v.trim();

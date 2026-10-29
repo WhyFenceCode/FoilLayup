@@ -84,7 +84,7 @@ def build_pieces(stack, sections, depths, ext_depths, frame, settings):
                         gap = model.end_gap(row.ply_t, settings, row.end_gap)
                     if not (first and kind == "ply" and k == 0):
                         # stop where this ply no longer fits inside the layers above it
-                        parts.append([sec.h[j] - outer[j] - gap for j in range(sec.m)])
+                        parts.append(_room_field(sec, [sec.h[j] - outer[j] - gap for j in range(sec.m)]))
                     f = None
                     if parts:
                         f = [min(vals) for vals in zip(*parts)]
@@ -111,6 +111,29 @@ def build_pieces(stack, sections, depths, ext_depths, frame, settings):
     for pc in pieces:
         pc.needs_seam = any(f is None or min(f) >= 0 for f in pc.fields)
     return pieces
+
+
+def _room_field(sec, f):
+    """Ply-end field that matches the 3D sections (geom.offset_chains): the
+    ply wraps the nose even where the small nose radius fails the room test,
+    and on each side it runs out from the nose until the first point without
+    room, then stops for good. Positive = ply present."""
+    m, le = sec.m, sec.le
+    g = [-abs(v) - 1e-3 for v in f]  # absent unless reached from the nose
+    for step in (-1, 1):
+        j = le
+        # the nose zone (geom.NOSE_X of chord) is covered: a small nose radius
+        # failing the room test there never ends a ply
+        while 0 < j < m and sec.x[j] < geom.NOSE_X:
+            g[j] = max(f[j], 1e-3)
+            j += step
+        while 0 < j < m:
+            if f[j] < 0:
+                break        # first point without room: the ply stops here
+            g[j] = f[j]
+            j += step
+    g[le] = max(g[le], 1e-3)
+    return g
 
 
 # --------------------------------------------------------------------------- strip grid

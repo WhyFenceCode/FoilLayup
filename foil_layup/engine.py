@@ -399,7 +399,14 @@ def side_mask_quads(sec, side, extend):
 def region_planform_polys(row, sections, frame, extend, include_tip=True):
     """Planform (s, c) polygons for the row's chord/span limits (not bounds).
     Returns None if the row has neither."""
-    span = row.eff_span if include_tip else row.span
+    # user limits stepped inward by edge_inset (tapered cap edges); tip end as is
+    ins = row.edge_inset
+    s0u, s1u = row.span if row.span else (None, None)
+    s0u = None if s0u is None else s0u + ins
+    s1u = None if s1u is None else s1u - ins
+    tip = row.tip_end if include_tip else None
+    s1 = s1u if tip is None else (tip if s1u is None else min(s1u, tip))
+    span = None if s0u is None and s1 is None else (s0u, s1)
     if not (row.chord or span):
         return None
     def inside_span(s):
@@ -426,8 +433,9 @@ def region_planform_polys(row, sections, frame, extend, include_tip=True):
         fwd, aft = [], []
         for sec in run:
             cle, cte = sec.ref_le, sec.ref_te
-            cf = cle + (c0 if c0 not in (None,) and c0 > 0 else 0) * (cte - cle)
-            ca = cle + (c1 if c1 not in (None,) and c1 < 1 else 1) * (cte - cle)
+            ci = row.chord_inset
+            cf = cle + ((c0 if c0 not in (None,) and c0 > 0 else 0) + ci) * (cte - cle)
+            ca = cle + ((c1 if c1 not in (None,) and c1 < 1 else 1) - ci) * (cte - cle)
             if c0 is None or c0 <= 0:
                 cf = min(p[0] for p in sec.pts) - extend
             if c1 is None or c1 >= 1:

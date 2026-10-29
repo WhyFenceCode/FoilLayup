@@ -27,7 +27,11 @@ DEFAULT_SETTINGS = {
     "mouldVf": 0.58,        # fibre volume fraction in the mould (compressed plies); 0 = library values
     "tipSchedule": True,    # drop plies spanwise towards the tips so the stack always fits
     "tipCoreMin": 1.0,      # mm: core thickness at which inner plies start to end
-    "tipDropSpacing": 10.0, # mm: minimum span distance between successive tip ply drops
+    "tipDropSpacing": 10.0,
+    "capEdgeStep": 3.0,     # mm: each inner ply of a span/bound-limited layer is this much
+                            # shorter on every such edge (stepped ply drops)
+    "capTaper": 0.5,        # chord-limited layers (spar caps): innermost ply width as a
+                            # fraction of the outermost; the plies in between step evenly # mm: minimum span distance between successive tip ply drops
     "plyEndRatio": 1.0,     # inner plies stop where the space inside the layers above
                             # them is less than ratio x ply thickness (no feather edges)
     "tipInset": 0.4,        # mm: first/last station inset from the body ends
@@ -108,6 +112,12 @@ class Row:
         self.end_gap = float(eg) if eg not in (None, "") else None  # mm, overrides plyEndRatio
         self.splits = [float(v) for v in (data.get("splits") or [])]
         self.tip_end = None  # span_ref where the tip drop schedule ends this ply
+        self.edge_inset = 0.0   # mm the span/bound limits are moved inward (stepped edges)
+        self.chord_inset = 0.0  # chord fraction each chord limit is moved inward
+        es = data.get("edgeStep")
+        self.edge_step = float(es) if es not in (None, "") else None
+        tp = data.get("taper")
+        self.taper = float(tp) if tp not in (None, "") else None
         self.plies = [Ply(self, i, a) for i, a in enumerate(parse_angles(data.get("angles", "0"), self.count))]
         if external and (self.side != "wrap" or self.has_user_region):
             # External consumables are modelled as full wraps.
@@ -142,6 +152,7 @@ class Row:
             u.plies[0].id = p.id
             u.plies[0].name = p.name
             u.parent = self
+            u.ply_index = p.index
             out.append(u)
         return out
 
@@ -194,6 +205,22 @@ class Stack:
             raise StackError("Layer ids must be unique")
         # geometry is built per ply: each unit is one ply of an editor row
         self.units = [u for r in self.rows for u in r.split(materials)]
+        # stepped edges: within a limited layer, each ply further in is narrower
+        default_step = float(self.settings.get("capEdgeStep", 0.0) or 0.0)
+        default_taper = float(self.settings.get("capTaper", 1.0) or 1.0)
+        for u in self.units:
+            n = u.parent.count
+            if not (u.has_user_region and n > 1):
+                continue
+            step = u.edge_step if u.edge_step is not None else default_step
+            u.edge_inset = u.ply_index * step
+            if u.chord:
+                c0, c1 = u.chord
+                c0 = 0.0 if c0 is None else c0
+                c1 = 1.0 if c1 is None else c1
+                taper = u.taper if u.taper is not None else default_taper
+                per = (c1 - c0) * (1.0 - max(0.0, min(1.0, taper))) / (2.0 * (n - 1))
+                u.chord_inset = u.ply_index * per
         self.ext_units = [u for r in self.external for u in r.split(materials)]
 
     @property
@@ -296,25 +323,27 @@ def region_field(row, sec, frame, bounds, chord_at=None):
         raise StackError("Bound sketch '%s' (layer %d) not found or has no closed loops"
                          % (row.bound_sketch, row.number))
     out = []
+    tip = (row.tip_end - sr) if row.tip_end is not None else float("inf")
     for j in range(sec.m):
         f = float("inf")
-        if row.eff_span:
-            s0, s1 = row.eff_span
+        if row.span:
+            s0, s1 = row.span
             if s0 is not None:
                 f = min(f, sr - s0)
             if s1 is not None:
                 f = min(f, s1 - sr)
-        if row.chord:
-            c0, c1 = row.chord
-            x = (sec.pts[j][0] - sec.ref_le) / (sec.ref_te - sec.ref_le)
-            if c0 is not None and c0 > 0:
-                f = min(f, (x - c0) * sec.chord)
-            if c1 is not None and c1 < 1:
-                f = min(f, (c1 - x) * sec.chord)
         if polys:
             d = geom.signed_distance_polys((sec.s, sec.pts[j][0]), polys)
             f = min(f, d if row.bound_mode != "outside" else -d)
-        out.append(f)
+        f -= row.edge_inset  # span/bound limits step inward per ply (mm)
+        if row.chord:        # chord limits step inward by a share of the band (taper)
+            c0, c1 = row.chord
+            x = (sec.pts[j][0] - sec.ref_le) / (sec.ref_te - sec.ref_le)
+            if c0 is not None and c0 > 0:
+                f = min(f, (x - c0 - row.chord_inset) * sec.chord)
+            if c1 is not None and c1 < 1:
+                f = min(f, (c1 - row.chord_inset - x) * sec.chord)
+        out.append(min(f, tip))  # the tip end does not step
     return out
 
 
