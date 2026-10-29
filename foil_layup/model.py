@@ -181,6 +181,15 @@ class Section:
         self.pts = geom.airfoil_resample(loop2d, m)
         self.n = geom.vertex_normals(self.pts)
         self.h = geom.medial_radius(self.pts, self.n)
+        # The sampled shrinking ball cannot see a sharp corner (it is limited by
+        # the neighbour spacing), but no layer fits at a sharp TE: a corner has
+        # zero clearance. Otherwise trimming flips between "reaches the TE" and
+        # "stops short" from one station to the next and lofts fold over.
+        for j in range(self.m):
+            a_ = geom.unit(geom.sub(self.pts[j], self.pts[j - 1]))
+            b_ = geom.unit(geom.sub(self.pts[(j + 1) % self.m], self.pts[j]))
+            if geom.dot(a_, b_) < 0.9:  # turns by more than ~25 deg
+                self.h[j] = 0.0
         te, le = self.pts[0], self.pts[self.le]
         self.te_pt, self.le_pt = te, le
         self.chord = geom.dist(te, le)

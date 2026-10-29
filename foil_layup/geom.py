@@ -233,42 +233,36 @@ def medial_radius(pts, normals, cap=1e6):
     return out
 
 
-def offset_loop(pts, normals, h, depth, min_gap, allowed=None):
-    """Offset a CCW loop inward by a per-vertex depth (mm).
+def offset_trimmed(pts, normals, h, depth, trim):
+    """Offset a CCW loop inward by per-vertex depth, trimmed continuously.
 
-    Vertices whose offset would come within min_gap of the medial axis are
-    dropped, which trims the loop where the section is too thin (trailing edge,
-    tips). Returns (points, kept_indices) or (None, []) if the loop vanished.
-    Negative depths offset outward and are never trimmed. allowed (a set of
-    vertex indices) additionally drops vertices a surface above was trimmed at.
+    A vertex is usable while h >= trim (trim = depth + end gap, i.e. the layer
+    still has room). Where usability changes between two vertices the exact
+    crossing point is interpolated, so the trimmed tip moves smoothly from one
+    station to the next instead of jumping by whole vertices.
+    Returns (points, trimmed?) or (None, True) when nothing is left.
     """
-    out, kept = [], []
-    for i, p in enumerate(pts):
-        d = depth[i]
-        if d > 0 and d > h[i] - min_gap:
-            continue
-        if allowed is not None and i not in allowed:
-            continue
-        out.append((p[0] + normals[i][0] * d, p[1] + normals[i][1] * d))
-        kept.append(i)
-    if len(out) < 8 or abs(signed_area(out)) < 1e-6:
-        return None, []
-    if signed_area(out) <= 0:  # trimmed into a figure eight / inverted
-        return None, []
-    return out, kept
+    n = len(pts)
 
+    def P(j):
+        return (pts[j][0] + normals[j][0] * depth[j], pts[j][1] + normals[j][1] * depth[j])
 
-def rotate_loop_start(pts, kept, start_index=0):
-    """Rotate a trimmed loop so it starts at the kept vertex closest (forward) to
-    start_index in the untrimmed numbering, giving lofts a stable seam."""
-    if not kept:
-        return pts, kept
-    best = 0
-    for k, idx in enumerate(kept):
-        if idx >= start_index:
-            best = k
-            break
-    return pts[best:] + pts[:best], kept[best:] + kept[:best]
+    f = [(h[j] - trim[j]) if depth[j] > 0 else 1.0 for j in range(n)]
+    if all(v >= 0 for v in f):
+        return [P(j) for j in range(n)], False
+    if all(v < 0 for v in f):
+        return None, True
+    out = []
+    for j in range(n):
+        k = (j + 1) % n
+        if f[j] >= 0:
+            out.append(P(j))
+        if (f[j] >= 0) != (f[k] >= 0):
+            t = f[j] / (f[j] - f[k])
+            out.append(lerp(P(j), P(k), t))
+    if len(out) < 8 or signed_area(out) <= 0:
+        return None, True
+    return out, True
 
 
 # --------------------------------------------------------------------------- planform polygons

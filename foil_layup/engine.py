@@ -26,36 +26,33 @@ def depth_tables(stack, sections, frame, bounds):
     return deps, ext
 
 
-def boundary_loop(sec, depth, min_gap, allowed=None, with_kept=False):
+def boundary_loop(sec, depth, min_gap, trim=None):
     """Offset loop for one surface at one section, ready for lofting.
 
-    Trimmed loops (too thin at the TE / tips) get their bridged tip rounded and
-    are resampled to the section's point structure (TE first, LE in the middle)
-    so neighbouring sections loft cleanly. Loops that are tiny or cross
-    themselves are dropped (None) and the loft simply skips that station.
+    trim[j] is the depth of the medial axis clearance this surface needs at
+    vertex j (default depth + min_gap); the loop ends smoothly where the
+    section gets thinner than that. Trimmed loops get their tip rounded and are
+    resampled to the section's point structure (TE first, LE in the middle) so
+    neighbouring sections loft cleanly. Loops that are tiny or cross themselves
+    are dropped (None) and the loft skips that station.
     """
-    pts, kept = geom.offset_loop(sec.pts, sec.n, sec.h, depth, min_gap, allowed)
+    if trim is None:
+        trim = [d + min_gap for d in depth]
+    pts, trimmed = geom.offset_trimmed(sec.pts, sec.n, sec.h, depth, trim)
     if pts is None:
-        return (None, set()) if with_kept else None
-    kept_set = set(kept)
-
-    def done(loop):
-        return (loop, kept_set if loop is not None else set()) if with_kept else loop
-
-    if len(kept) < sec.m:
+        return None
+    if trimmed:
         xs = [p[0] for p in pts]
         ys = [p[1] for p in pts]
         if max(xs) - min(xs) < 8 * min_gap or max(ys) - min(ys) < 4 * min_gap:
-            return done(None)
+            return None
         try:
             pts = geom.airfoil_resample(geom.chaikin(pts, 2), sec.m)
         except (ValueError, ZeroDivisionError):
-            return done(None)
-    else:
-        pts, kept = geom.rotate_loop_start(pts, kept, 0)
+            return None
     if geom.signed_area(pts) <= 0 or geom.self_intersects(pts):
-        return done(None)
-    return done(pts)
+        return None
+    return pts
 
 
 def loft_plan(stack, sections, deps, ext, min_gap):
@@ -69,23 +66,26 @@ def loft_plan(stack, sections, deps, ext, min_gap):
     ends with a blunt end and the outer layers carry on to the edge.
     """
     plan = {}
-    prev = [sec.pts for sec in sections]          # surface each new one must stay inside
-    allowed = [set(range(sec.m)) for sec in sections]  # vertices still kept by the surfaces above
+    prev = [sec.pts for sec in sections]       # surface each new one must stay inside
+    prev_trim = [None] * len(sections)         # trim depth of the surface above
     for ri, row in enumerate(stack.units):
         nxt = stack.units[ri + 1] if ri + 1 < len(stack.units) else None
         gap = model.end_gap(nxt.ply_t, stack.settings, nxt.end_gap) if nxt else min_gap
-        after, kept = [], []
+        after, trims = [], []
         for i, sec in enumerate(sections):
-            loop, k = boundary_loop(sec, deps[i][ri]["after"], gap, allowed[i], with_kept=True)
-            after.append(_nested(loop, prev[i]))
-            kept.append(k)
+            d = deps[i][ri]["after"]
+            t = _trim_after(d, gap, prev_trim[i])
+            after.append(_nested(boundary_loop(sec, d, gap, t), prev[i]))
+            trims.append(t)
         plan["after:%s" % row.id] = [(sec.s, after[i]) for i, sec in enumerate(sections)]
         if not row.is_full:
-            plan["full:%s" % row.id] = [
-                (sec.s, _nested(boundary_loop(sec, deps[i][ri]["full"], gap, allowed[i]), prev[i]))
-                for i, sec in enumerate(sections)]
+            full = []
+            for i, sec in enumerate(sections):
+                d = deps[i][ri]["full"]
+                full.append((sec.s, _nested(boundary_loop(sec, d, gap, _trim_after(d, gap, prev_trim[i])), prev[i])))
+            plan["full:%s" % row.id] = full
         prev = after
-        allowed = [_erode(k, sec.m) for k, sec in zip(kept, sections)]
+        prev_trim = trims
     for ri, row in enumerate(stack.ext_units):
         plan["ext:%s" % row.id] = [(sec.s, boundary_loop(sec, ext[i][ri]["after"], min_gap))
                                    for i, sec in enumerate(sections)]
@@ -95,16 +95,17 @@ def loft_plan(stack, sections, deps, ext, min_gap):
 NEST_MARGIN = 0.01  # mm
 
 
-def _erode(kept, m, steps=1):
-    """Vertex set minus `steps` vertices at every trimmed end, so the next
-    surface in always stops clearly short of this one (near-touching tips make
-    Fusion's booleans fail). An untrimmed loop stays complete."""
-    if len(kept) >= m:
-        return set(kept)
-    out = set(kept)
-    for _ in range(steps):
-        out = {j for j in out if (j - 1) % m in out and (j + 1) % m in out}
-    return out
+TIP_STEP = 0.05  # mm of thickness between the trimmed tips of nested surfaces
+
+
+def _trim_after(depth, gap, prev_trim):
+    """Trim depth for a surface: its own depth + end gap, but always at least
+    TIP_STEP beyond the surface above, so the tips of nested surfaces never
+    meet (near-touching tips make Fusion's booleans fail)."""
+    t = [d + gap for d in depth]
+    if prev_trim is None:
+        return t
+    return [max(a, b + TIP_STEP) for a, b in zip(t, prev_trim)]
 
 
 def _nested(loop, outer):

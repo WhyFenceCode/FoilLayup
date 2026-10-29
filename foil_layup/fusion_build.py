@@ -476,6 +476,7 @@ def generate(stack_data, user_materials, log, progress):
     b = Builder(comp, base, frame, log, progress)
     pending = []  # (transient body, name, role, info, material)
     made = []     # (real body, role, info, material)
+    skipped = []  # plies that could not be built
     try:
         cur = b.copy(native)
         n_rows = len(stack.units)
@@ -491,26 +492,40 @@ def generate(stack_data, user_materials, log, progress):
                 continue
             inset = step * (ri + 1)  # each inner surface ends a little inside the one above
             after = b.loft(plan["after:%s" % row.id], "FL S%d" % (ri + 1), inset)
-            slot = cur  # everything outside the next surface belongs to this row
-            if row.is_full:
-                if after is not None:
-                    b.boolean(slot, after, "cut", "%s: inner surface" % label)
-            else:
-                full = b.loft(plan["full:%s" % row.id], "FL F%d" % (ri + 1), inset)
-                if full is not None:
-                    b.boolean(slot, full, "cut", "%s: full-thickness surface" % label)
+            # tools: the inner surface to cut out, and the masks limiting this ply
+            slot = fill = None
+            errors = []
+            try:
+                if row.is_full:
+                    inner = after
+                else:
+                    inner = b.loft(plan["full:%s" % row.id], "FL F%d" % (ri + 1), inset)
+                mask = None
                 if row.side != "wrap":
                     quads = [(sec.s, engine.side_mask_quads(sec, row.side, sec.chord + BIG_EXTEND))
                              for sec in sections]
-                    b.boolean(slot, b.loft_polys(quads, "FL side mask %d" % (ri + 1)), "intersect",
-                              "%s: %s-side mask" % (label, row.side))
-            fill = None
-            if row.has_region:
-                region = _region_tool(b, row, sections, frame, bounds, thickness_span, ri)
-                if row.outside:
-                    fill = b.copy(slot)
-                    b.boolean(fill, region, "cut", "%s: fill outside limits" % label)
-                b.boolean(slot, region, "intersect", "%s: span/chord/bound limits" % label)
+                    mask = b.loft_polys(quads, "FL side mask %d" % (ri + 1))
+                region = (_region_tool(b, row, sections, frame, bounds, thickness_span, ri)
+                          if row.has_region else None)
+            except FusionError as e:
+                log("WARNING: %s could not be built and was skipped (tools: %s)" % (label, e))
+                skipped.append(label)
+                cur = after
+                continue
+            # Limits first on a fresh copy of the surface above, then the cut, is the
+            # gentlest order for the kernel; the other order is the fallback.
+            for order in ("limits first", "cut first"):
+                try:
+                    slot, fill = _ply_body(b, cur, inner, mask, region, bool(row.outside), order, label, row.side)
+                    break
+                except FusionError as e:
+                    errors.append("%s: %s" % (order, e))
+                    slot = fill = None
+            if slot is None:
+                log("WARNING: %s could not be built and was skipped (%s)" % (label, "; ".join(errors)))
+                skipped.append(label)
+                cur = after
+                continue
             if _has_volume(slot):
                 pending.append((slot, label, "ply", info, row.material))
             else:
@@ -611,10 +626,39 @@ def generate(stack_data, user_materials, log, progress):
         sum(r["mass_g"] for r in report if r["role"] == "ply"),
         sum(r["mass_g"] for r in report if r["role"] in ("core", "corefill")), part,
         (", external layers %.1f g" % ext) if ext else ""))
-    return {"bodies": report, "seamPlan": seam_plan,
+    return {"bodies": report, "seamPlan": seam_plan, "skipped": skipped,
             "seams": [{"piece": pc.id, "label": pc.label, "msg": pc.seam["msg"], "ok": pc.seam["ok"]}
                       for pc in pieces if pc.seam],
             "frame": {k: frame[k] for k in ("spanAxis", "upAxis", "chordAxis", "sMin", "sMax", "hand")}}
+
+
+def _ply_body(b, outer, inner, mask, region, with_fill, order, label, side):
+    """Ply body = (outer surface - inner surface) limited by the side mask and
+    region; fill = the same slot outside the region. Works on copies so a
+    failed attempt leaves 'outer' untouched for the next one."""
+    def limit(body):
+        fill = None
+        if mask is not None:
+            b.boolean(body, mask, "intersect", "%s: %s-side mask" % (label, side))
+        if region is not None:
+            if with_fill:
+                fill = b.copy(body)
+                b.boolean(fill, region, "cut", "%s: fill outside limits" % label)
+            b.boolean(body, region, "intersect", "%s: span/chord/bound limits" % label)
+        return fill
+
+    body = b.copy(outer)
+    if order == "limits first":
+        fill = limit(body)
+        if inner is not None:
+            b.boolean(body, inner, "cut", "%s: inner surface" % label)
+            if fill is not None:
+                b.boolean(fill, inner, "cut", "%s: fill inner surface" % label)
+    else:
+        if inner is not None:
+            b.boolean(body, inner, "cut", "%s: inner surface" % label)
+        fill = limit(body)
+    return body, fill
 
 
 def _shift_ends(run, inset):

@@ -699,6 +699,9 @@ function onGenerateDone(r) {
     core = sum((b) => b.role === "core" || b.role === "corefill"), ext = sum((b) => b.role === "external");
   const part = plies + fills + core;
   let html = `<p>Generated ${r.bodies.length} bodies (one per ply). Part mass <b>${fmt(part, 0)} g</b>.</p>`;
+  if (r.skipped && r.skipped.length) {
+    html += `<p class="err">Not built (see log): ${r.skipped.map(esc).join(", ")}. The part mass excludes them.</p>`;
+  }
   html += `<table class="tbl"><tr><th>Body</th><th>Role</th><th>Material</th><th>Volume cm³</th><th>Mass g</th></tr>` +
     r.bodies.map((b) => `<tr><td>${esc(b.name)}</td><td>${esc(b.role)}</td><td>${esc(b.material)}</td><td class="num">${fmt(b.volume_cm3, 2)}</td><td class="num">${fmt(b.mass_g, 1)}</td></tr>`).join("") + "</table>";
   if (r.seams && r.seams.length) {
