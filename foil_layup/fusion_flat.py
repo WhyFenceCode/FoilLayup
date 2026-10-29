@@ -71,7 +71,11 @@ def flatten(stack_data, user_materials, folder, make_sketches, log, progress):
 
     if make_sketches:
         progress("Drawing flat patterns", 0, 1)
-        _draw(des, results, float(st["rollWidth"]), log)
+        try:
+            _draw(des, results, float(st["rollWidth"]), log)
+        except Exception as e:  # the files are written; drawing is a bonus
+            log("WARNING: flat patterns not drawn in Fusion (%s); the DXF/SVG/CSV files are complete"
+                % (str(e).splitlines()[0] if str(e) else e))
 
     table = []
     for r in results:
@@ -82,21 +86,52 @@ def flatten(stack_data, user_materials, folder, make_sketches, log, progress):
             "rollLength": round(length, 1), "svg": svg}
 
 
-def _draw(des, results, roll_width, log):
-    """Sketch every pattern (nested) on the ground plane of a new component."""
+def _remove_previous_drawing(des):
+    """Delete the pattern sketches / component from a previous Flatten."""
     root = des.rootComponent
-    occ = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
-    comp = occ.component
-    comp.name = "Flat patterns"
+    for occ in list(root.occurrences):
+        try:
+            if occ.component.attributes.itemByName(ATTR, "flat"):
+                occ.deleteMe()
+        except Exception:
+            pass
+    for sk in list(root.sketches):
+        try:
+            if sk.attributes.itemByName(ATTR, "flat"):
+                sk.deleteMe()
+        except Exception:
+            pass
+
+
+def _draw(des, results, roll_width, log):
+    """Sketch every pattern (nested) on the ground plane, beside the foil: in a
+    new 'Flat patterns' component, or in the root component of a Part Design
+    document (which allows only one component)."""
+    _remove_previous_drawing(des)
+    root = des.rootComponent
+    prefix = ""
+    try:
+        occ = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+        comp = occ.component
+        comp.name = "Flat patterns"
+        comp.attributes.add(ATTR, "flat", "1")
+    except RuntimeError:
+        comp = root
+        prefix = "Flat pattern "
+        log("Part Design document: flat pattern sketches are added to the main component")
     plane = comp.xYConstructionPlane if preferred_up() == "Z" else comp.xZConstructionPlane
     offsets, _length, _tw = export.nest(results, roll_width)
+    base = None  # sketch-space origin of the nest, clear of everything already modelled
     for r, off in zip(results, offsets):
         if off is None:
             continue
         sk = comp.sketches.add(plane)
-        sk.name = export.safe_name(r["label"])[:60]
+        sk.name = (prefix + export.safe_name(r["label"]))[:60]
+        sk.attributes.add(ATTR, "flat", "1")
         sk.isComputeDeferred = True
-        dx, dy = off
+        if base is None:
+            base = _clear_origin(root, sk)
+        dx, dy = off[0] + base[0], off[1] + base[1]
         _poly(sk, [(x + dx, y + dy) for x, y in r["outline"]])
         for h in r["holes"]:
             _poly(sk, [(x + dx, y + dy) for x, y in h])
@@ -117,6 +152,23 @@ def _draw(des, results, roll_width, log):
         except Exception as e:
             log("Label skipped for %s (%s)" % (r["label"], e))
         sk.isComputeDeferred = False
+
+
+def _clear_origin(root, sk):
+    """Sketch-space point (mm) just beyond the model's bounding box, so the
+    patterns do not land on top of the foil."""
+    try:
+        bb = root.boundingBox
+        xs, ys = [], []
+        for x in (bb.minPoint.x, bb.maxPoint.x):
+            for y in (bb.minPoint.y, bb.maxPoint.y):
+                for z in (bb.minPoint.z, bb.maxPoint.z):
+                    q = sk.modelToSketchSpace(adsk.core.Point3D.create(x, y, z))
+                    xs.append(q.x)
+                    ys.append(q.y)
+        return (max(xs) / CM + 100.0, min(ys) / CM)
+    except Exception:
+        return (0.0, 0.0)
 
 
 def _poly(sk, pts):
