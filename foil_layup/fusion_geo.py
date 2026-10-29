@@ -302,7 +302,7 @@ def load_bounds(names, frame, log=None):
 
 
 # --------------------------------------------------------------------------- keep-outs
-def keepout_bodies(stack_data, target_body):
+def keepout_bodies(stack_data, target_body, log=None):
     """Resolve keep-outs to (temporary body in target component space, clearance mm, name)."""
     tbm = adsk.fusion.TemporaryBRepManager.get()
     _native, _comp, inv = target_context(target_body)
@@ -310,7 +310,9 @@ def keepout_bodies(stack_data, target_body):
     for ko in stack_data.get("keepouts") or []:
         b = find_by_token(ko.get("token"))
         if b is None:
-            raise FusionError("Keep-out body '%s' no longer exists" % ko.get("name"))
+            if log:
+                log("WARNING: keep-out body '%s' is not in this design; skipped" % ko.get("name"))
+            continue
         b = adsk.fusion.BRepBody.cast(b)
         tmp = tbm.copy(b)
         if inv is not None:

@@ -12,7 +12,8 @@ import math
 from . import geom
 
 DEFAULT_SETTINGS = {
-    "construction": "offset",  # 'offset': exact offsets of the body; 'loft': lofted sections
+    "construction": "loft",  # 'loft': loft the planned sections (what the preview shows); 'offset': Fusion offsets
+    "splitAtCentre": False,  # loft each half separately and join at the centre plane
     "loftStations": 40,     # sections used to loft the 3D layer surfaces
     "loftPoints": 120,      # points per loft section
     "flatStations": 60,     # sections used for flat patterns
@@ -22,6 +23,7 @@ DEFAULT_SETTINGS = {
     "minGap": 0.15,         # mm: minimum half-thickness kept inside an inner surface
     "chordRefSmoothing": 0.05,  # chord limits use LE/TE smoothed over this share of
                                 # the span, so a centre hub does not drag bands sideways
+    "mouldVf": 0.58,        # fibre volume fraction in the mould (compressed plies); 0 = library values
     "tipSchedule": True,    # drop plies spanwise towards the tips so the stack always fits
     "tipCoreMin": 1.0,      # mm: core thickness at which inner plies start to end
     "plyEndRatio": 1.0,     # inner plies stop where the space inside the layers above
@@ -163,9 +165,14 @@ def _range(v):
 class Stack:
     def __init__(self, data, materials):
         self.data = data
-        self.materials = materials
         self.settings = dict(DEFAULT_SETTINGS)
         self.settings.update(data.get("settings") or {})
+        # plies are consolidated under mould pressure: fabric thickness and
+        # laminate density at the in-mould fibre volume fraction
+        from .materials import in_mould
+        vf = float(self.settings.get("mouldVf") or 0)
+        materials = {k: in_mould(m, vf) for k, m in materials.items()}
+        self.materials = materials
         self.rows = [Row(r, materials, i + 1) for i, r in enumerate(data.get("layers") or [])]
         self.external = [Row(r, materials, i + 1, True) for i, r in enumerate(data.get("external") or [])]
         core = data.get("core") or {}

@@ -89,9 +89,19 @@ function matList(filter) {
 function layerMaterials() {
   return matList((m) => m.category !== "core");
 }
+/* Cured ply thickness in the mould: fabrics at the in-mould fibre fraction
+   (Setup), same rule as the Python side (materials.in_mould). */
 function plyT(r) {
+  if (+r.thickness) return +r.thickness;
   const m = S.mats[r.material];
-  return +r.thickness || (m ? +m.thickness : 0);
+  if (!m) return 0;
+  const vf = +((S.stack && S.stack.settings && S.stack.settings.mouldVf) || 0);
+  const rho = FIBRES[m.fibre];
+  if (vf > 0 && m.category === "fabric" && rho && m.gsm) {
+    const v = Math.min(0.68, vf + (m.form === "UD" ? 0.03 : 0));
+    return m.gsm / (rho * v * 1000);
+  }
+  return +m.thickness;
 }
 function rowT(r) {
   return plyT(r) * Math.max(1, +r.count || 1);
@@ -188,6 +198,7 @@ function bindSetup() {
       else v = el.hasAttribute("data-len") ? fromU(el.value) : +el.value;
       S.stack.settings[key] = v;
       saveStack();
+      if (key === "mouldVf") { renderStack(); schedulePreview(); }
     })
   );
   $("#analyze").addEventListener("click", analyze);
@@ -289,7 +300,7 @@ function renderMaterials() {
   const q = ($("#matFilter").value || "").toLowerCase();
   const rows = matList((m) => !q || (m.name + " " + m.fibre + " " + m.form + " " + m.id).toLowerCase().includes(q));
   rows.sort((a, b) => (a.builtin === b.builtin ? 0 : a.builtin ? 1 : -1) || CATS.indexOf(a.category) - CATS.indexOf(b.category));
-  const head = "<tr><th></th><th>Id</th><th>Name</th><th>Category</th><th>Fibre</th><th>Form</th><th>g/m²</th><th>Vf</th><th>Ply t (mm)</th><th>Density (kg/m³)</th><th></th></tr>";
+  const head = "<tr><th></th><th>Id</th><th>Name</th><th>Category</th><th>Fibre</th><th>Form</th><th>g/m²</th><th>Vf</th><th title='Library value. The layup uses the in-mould Vf from Setup unless that is 0.'>Ply t library (mm)</th><th>Density (kg/m³)</th><th></th></tr>";
   const body = rows.map((m) => {
     if (m.builtin) {
       return `<tr><td><span class="swatch" style="background:${esc(m.color)}"></span></td><td>${esc(m.id)}</td><td>${esc(m.name)}</td><td>${esc(m.category)}</td>
@@ -410,7 +421,7 @@ function rowHtml(r, i, group) {
         <select data-f="outsideMaterial"><option value="">nothing (layer ends; inner layers move out)</option>
           <option value="core" ${r.outsideMaterial === "core" ? "selected" : ""}>core material</option>
           ${matOptions(r.outsideMaterial, () => true)}</select></label>
-      <label>Ply thickness override (mm)<input type="number" step="any" data-f="thickness" value="${r.thickness || ""}" placeholder="${m ? fmt(m.thickness, 3) : ""}"></label>
+      <label>Ply thickness override (mm)<input type="number" step="any" data-f="thickness" value="${r.thickness || ""}" placeholder="${m ? fmt(plyT({ material: r.material }), 3) : ""}"></label>
       <label title="Each ply of this layer stops where the space left inside the layers above it is thinner than this (half-thickness, mm). Empty = Setup's 'Inner ply end' x ply thickness.">Stop where space &lt; (mm, each ply)<input type="number" step="any" min="0" data-f="endGap" value="${r.endGap ?? ""}" placeholder="${fmt((S.stack.settings.plyEndRatio ?? 1) * plyT(r), 3)}"></label>
       <label>Pattern splits at span (${S.units}; ";" separated)<input data-f="splits" value="${(r.splits || []).map((v) => toU(v)).join("; ")}" placeholder="e.g. 0; 250"></label>
       <label>Id<input data-f="id" value="${esc(r.id)}"></label>
@@ -545,9 +556,11 @@ function bindStack() {
       const r = await call("importStack");
       if (r.cancelled) return;
       if (r.stack) {
+        // keep this design's body selection; ignore any body or seams in the file
         const keepTarget = S.stack.target;
-        S.stack = { ...defaultStack(), ...r.stack };
-        if (!S.stack.target) S.stack.target = keepTarget;
+        S.stack = { ...defaultStack(), ...r.stack, target: keepTarget, seamPlan: {} };
+        S.stack.settings = { ...S.init.defaults, ...(r.stack.settings || {}) };
+        S.stack.frame = { ...defaultStack().frame, ...(r.stack.frame || {}) };
       } else if (r.partial) {
         S.stack.layers = []; S.stack.external = [];
         for (const g of ["layers", "external"]) for (const row of r.partial[g]) { row.id = row.id || newId(g === "external" ? "E" : "L"); S.stack[g].push(row); }
@@ -558,6 +571,13 @@ function bindStack() {
     } catch (e) { fail(e); }
   });
   $("#pvGo").addEventListener("click", () => { S.previewS = fromU($("#pvS").value) || 0; loadPreview(); });
+  $("#pvS").addEventListener("change", () => { S.previewS = fromU($("#pvS").value) || 0; syncSlider(); loadPreview(); });
+  $("#pvSlider").addEventListener("input", (ev) => {
+    S.previewS = +ev.target.value;
+    $("#pvS").value = fmt(toU(S.previewS), 1);
+    clearTimeout(loadPreview.t);
+    loadPreview.t = setTimeout(loadPreview, 250); // follow the drag without flooding Fusion
+  });
   $("#pvExag").addEventListener("input", drawPreview);
   $("#pvZoom").addEventListener("change", drawPreview);
 }
@@ -572,10 +592,21 @@ async function loadPreview() {
   if (!S.stack.target) return;
   try {
     S.preview = await call("preview", { stack: S.stack, s: S.previewS || 0 });
+    if (S.preview.sMin !== undefined) S.span = [S.preview.sMin, S.preview.sMax];
+    syncSlider();
     drawPreview();
   } catch (e) {
     $("#preview").innerHTML = `<p class="err">${esc(e.message)}</p>`;
   }
+}
+function syncSlider() {
+  const sl = $("#pvSlider");
+  if (!sl) return;
+  if (S.span) {
+    sl.min = (S.span[0] + 0.5).toFixed(1);
+    sl.max = (S.span[1] - 0.5).toFixed(1);
+  }
+  sl.value = S.previewS || 0;
 }
 function drawPreview() {
   const p = S.preview;

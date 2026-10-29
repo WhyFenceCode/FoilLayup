@@ -48,7 +48,7 @@ def flatten(stack_data, user_materials, folder, make_sketches, log, progress):
 
     kos = _generated_keepout_tools(comp)
     if not kos and stack_data.get("keepouts"):
-        kos = keepout_bodies(stack_data, target)
+        kos = keepout_bodies(stack_data, target, log)
         log("Keep-out holes use the keep-out bodies directly (run Generate first for exact clearances)")
     ko_fn = keepout_field_fn(kos, frame)
 

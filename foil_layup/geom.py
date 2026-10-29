@@ -265,6 +265,100 @@ def ray_half_thickness(pts, normals, cap=1e6):
     return out
 
 
+def offset_chains(pts, normals, h, depth, trim, le):
+    """Offset a CCW section (index 0 = TE, le = LE) inward by per-vertex depth
+    and cut it where the layer runs out of room (h < trim).
+
+    Returns (upper, lower): two chains that both start at the nose and run out
+    to the exact points where the layer stops (interpolated between
+    vertices, so the stop moves smoothly along the span). Like a foil section
+    with a blunt trailing edge, the two ends are joined by a straight line.
+    Where the layer is deeper than the nose radius the offset folds over itself
+    at the nose; the fold is cut where the two sides cross, giving a pointed
+    inner nose. With no stop (outward offsets) the chains end one vertex short
+    of the TE so the closing line is short but not zero.
+    """
+    n = len(pts)
+
+    def P(j):
+        j %= n
+        return (pts[j][0] + normals[j][0] * depth[j], pts[j][1] + normals[j][1] * depth[j])
+
+    f = [(h[j] - trim[j]) if depth[j] > 0 else 1.0 for j in range(n)]
+
+    # first usable vertex on each side of the nose
+    iu, il = le, le
+    while iu > 1 and f[iu] < 0:
+        iu -= 1
+    while il < n - 1 and f[il] < 0:
+        il += 1
+    if f[iu] < 0 or f[il] < 0:
+        return None
+
+    if iu == le and il == le:
+        nose, ju, jl = P(le), le, le
+    else:
+        # raw offset polylines from the first usable vertex in to the nose
+        up_poly = [P(j) for j in range(iu, le + 1)]
+        lo_poly = [P(j) for j in range(il, le - 1, -1)]
+        best = None
+        for a in range(len(up_poly) - 1):
+            for b in range(len(lo_poly) - 1):
+                if best is not None and a + b >= best[0]:
+                    break
+                if _seg_cross(up_poly[a], up_poly[a + 1], lo_poly[b], lo_poly[b + 1]):
+                    x = _seg_intersection(up_poly[a], up_poly[a + 1], lo_poly[b], lo_poly[b + 1])
+                    best = (a + b, a, b, x)
+        if best is None:
+            nose, ju, jl = lerp(P(iu), P(il), 0.5), iu, il
+        else:
+            _k, a, b, nose = best
+            ju, jl = iu + a, il - b
+
+    def walk(chain, j, step):
+        for _ in range(n // 2):
+            k = (j + step) % n
+            if k == 0:                       # reached the TE vertex with room all the way
+                return chain
+            if f[k] < 0:
+                t = f[j] / (f[j] - f[k])
+                cut = lerp(P(j), P(k), t)
+                if dist(cut, chain[-1]) < 1e-6 and len(chain) > 1:
+                    chain[-1] = cut
+                else:
+                    chain.append(cut)
+                return chain
+            chain.append(P(k))
+            j = k
+        return chain
+
+    # from the fold out to the first vertex with room, the offset points are on
+    # the surface even though the small nose radius fails the room test there
+    up_start = [nose] + [P(j) for j in range(ju, iu - 1, -1) if j != le]
+    lo_start = [nose] + [P(j) for j in range(jl, il + 1) if j != le]
+    upper = walk(_dedupe_chain(up_start), iu, -1)
+    lower = walk(_dedupe_chain(lo_start), il, +1)
+    if len(upper) < 3 or len(lower) < 3:
+        return None
+    return upper, lower
+
+
+def _dedupe_chain(chain, tol=1e-6):
+    out = [chain[0]]
+    for p in chain[1:]:
+        if dist(p, out[-1]) > tol:
+            out.append(p)
+    return out
+
+
+def _seg_intersection(p1, p2, p3, p4):
+    d = (p2[0] - p1[0]) * (p4[1] - p3[1]) - (p2[1] - p1[1]) * (p4[0] - p3[0])
+    if abs(d) < 1e-15:
+        return lerp(p1, p2, 0.5)
+    t = ((p3[0] - p1[0]) * (p4[1] - p3[1]) - (p3[1] - p1[1]) * (p4[0] - p3[0])) / d
+    return lerp(p1, p2, t)
+
+
 def offset_trimmed(pts, normals, h, depth, trim):
     """Offset a CCW loop inward by per-vertex depth, trimmed continuously.
 

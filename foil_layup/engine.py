@@ -123,31 +123,31 @@ def depth_tables(stack, sections, frame, bounds):
 
 
 def boundary_loop(sec, depth, min_gap, trim=None):
-    """Offset loop for one surface at one section, ready for lofting.
+    """Section of one layer surface at one station, ready for lofting.
 
-    trim[j] is the depth of the medial axis clearance this surface needs at
-    vertex j (default depth + min_gap); the loop ends smoothly where the
-    section gets thinner than that. Trimmed loops get their tip rounded and are
-    resampled to the section's point structure (TE first, LE in the middle) so
-    neighbouring sections loft cleanly. Loops that are tiny or cross themselves
-    are dropped (None) and the loft skips that station.
+    trim[j] is the clearance this surface needs at vertex j (default depth +
+    min_gap); the surface stops where the section gets thinner than that.
+    Returns points from the upper stop point round the LE to the lower stop
+    point (2n-1 points, the LE in the middle); the section is closed by the
+    straight line from the last point back to the first. None if nothing fits.
     """
     if trim is None:
         trim = [d + min_gap for d in depth]
-    pts, trimmed = geom.offset_trimmed(sec.pts, sec.n, sec.h, depth, trim)
-    if pts is None:
+    chains = geom.offset_chains(sec.pts, sec.n, sec.h, depth, trim, sec.le)
+    if chains is None:
         return None
-    if trimmed:
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        if max(xs) - min(xs) < 8 * min_gap or max(ys) - min(ys) < 4 * min_gap:
-            return None
-        # keep the natural points plus the rounded cap (resampling would crush a
-        # sub-millimetre cap into a spike); one light rounding pass, then start
-        # at the tip so neighbouring sections line up in the loft
-        pts = geom.chaikin(pts, 1)
-        tip = max(range(len(pts)), key=lambda j: pts[j][0])
-        pts = pts[tip:] + pts[:tip]
+    upper, lower = chains
+    # Same make-up at every station, like the foil's own sections: each chain
+    # resampled to the same number of points with the same spacing (dense at
+    # the LE and at the stopped end), so lofts match point to point.
+    n = max(8, sec.m // 2)
+    up = geom.resample_open(upper, n)
+    lo = geom.resample_open(lower, n)
+    pts = list(reversed(up)) + lo[1:]   # upper stop -> LE -> lower stop
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    if max(xs) - min(xs) < 8 * min_gap or max(ys) - min(ys) < 2 * min_gap:
+        return None
     if geom.signed_area(pts) <= 0 or geom.self_intersects(pts):
         return None
     return pts
@@ -171,7 +171,14 @@ def loft_plan(stack, sections, deps, ext, min_gap):
         gap = model.end_gap(nxt.ply_t, stack.settings, nxt.end_gap) if nxt else min_gap
         after, trims = [], []
         for i, sec in enumerate(sections):
-            loop, t = _nested_loop(sec, deps[i][ri]["after"], gap, prev_trim[i], prev[i])
+            rd = deps[i][ri]
+            if ri > 0 and max(rd["a"]) <= 0.0 and prev[i] is not None:
+                # the ply is absent at this station: its inner surface is the
+                # surface above, point for point
+                after.append(prev[i])
+                trims.append(prev_trim[i])
+                continue
+            loop, t = _nested_loop(sec, rd["after"], gap, prev_trim[i], prev[i])
             after.append(loop)
             trims.append(t)
         plan["after:%s" % row.id] = [(sec.s, after[i]) for i, sec in enumerate(sections)]

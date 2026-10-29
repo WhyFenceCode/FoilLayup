@@ -154,6 +154,21 @@ BUILTIN_PRESETS = [
 ]
 
 
+def in_mould(material, vf):
+    """Copy of a fabric with thickness and laminate density at fibre volume
+    fraction vf (the consolidated, in-mould state). UD packs slightly tighter.
+    Non-fabrics, unknown fibres and vf <= 0 are returned unchanged."""
+    rho = FIBRES.get(material.get("fibre"))
+    if vf <= 0 or material.get("category") != "fabric" or not rho or not material.get("gsm"):
+        return material
+    v = min(0.68, vf + (0.03 if material.get("form") == "UD" else 0.0))
+    m = dict(material)
+    m["vf"] = round(v, 3)
+    m["thickness"] = round(material["gsm"] / (rho * v * 1000.0), 4)
+    m["density"] = round((v * rho + (1 - v) * RESIN_DENSITY) * 1000.0)
+    return m
+
+
 def material_index(user_materials=None):
     idx = {m["id"]: dict(m) for m in BUILTIN_MATERIALS}
     for m in user_materials or []:

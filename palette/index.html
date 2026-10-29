@@ -44,7 +44,7 @@
     <div class="card">
       <h3>Geometry resolution</h3>
       <div class="fields">
-        <label title="Offset: every inner surface is an exact Fusion offset of the one above (robust with hubs and fillets; ply drops are vertical steps). Loft: surfaces lofted through computed sections (smooth ply-drop ramps, but fragile on complex wings).">3D method <select data-set="construction"><option value="offset">offset (recommended)</option><option value="loft">loft through sections</option></select></label>
+        <label title="Loft: every layer surface is lofted through exactly the sections the preview draws (same point layout at every station, blunt ends at ply stops). Offset: Fusion offsets of the body; experimental.">3D method <select data-set="construction"><option value="loft">loft the previewed sections (recommended)</option><option value="offset">Fusion offsets (experimental)</option></select></label>
         <label>Loft stations <input type="number" data-set="loftStations" min="8" max="150"></label>
         <label>Loft points / section <input type="number" data-set="loftPoints" min="40" max="400" step="2"></label>
         <label>Ply drop ramp (length : thickness) <input type="number" data-set="dropRatio" min="1" step="any"></label>
@@ -53,6 +53,7 @@
         <label title="Chord-% limits are measured against the leading/trailing edge smoothed along the span by this share of the span, so a centre hub or pod does not drag spar caps sideways. 0 = local chord.">Chord-% reference smoothing (share of span) <input type="number" data-set="chordRefSmoothing" min="0" max="0.5" step="0.01"></label>
         <label>Tip inset (mm) <input type="number" data-set="tipInset" min="0.05" step="any"></label>
         <label class="chk" title="Towards the tips, plies end one by one so the stack always fits: limited plies (spar caps) innermost first, then the other inner plies; the outermost ply runs to the tip."><input type="checkbox" data-set="tipSchedule"> Drop plies towards the tips (spar caps first, then inner plies)</label>
+        <label title="Fibre volume fraction of the plies once compressed in the mould. Every fabric's cured thickness and laminate density are computed from its g/m² at this value (UD +0.03). 0 = use the thickness in the material library. Typical: wet layup 0.40, vacuum bag 0.50, infusion 0.55, closed/press mould 0.58-0.62.">In-mould fibre fraction (Vf, 0 = library) <input type="number" data-set="mouldVf" min="0" max="0.7" step="0.01"></label>
         <label title="Core thickness at which the inner plies start to end near the tips.">Minimum core thickness near tips (mm) <input type="number" data-set="tipCoreMin" min="0" step="0.1"></label>
         <label class="chk"><input type="checkbox" data-set="hideOriginal"> Hide original body after Generate</label>
       </div>
@@ -115,6 +116,7 @@
       <h3>Section preview</h3>
       <div class="row">
         <label>Station <span class="u"></span> <input type="number" id="pvS" step="any" value="0"></label>
+        <input type="range" id="pvSlider" min="-500" max="500" step="0.5" value="0" class="grow" title="Drag along the span (centre in the middle, tips at the ends)">
         <label>Thickness &times; <input type="range" id="pvExag" min="1" max="6" step="0.5" value="1"></label>
         <select id="pvZoom"><option value="all">Whole section</option><option value="le">Leading edge</option><option value="te">Trailing edge</option></select>
         <button id="pvGo">Update</button>

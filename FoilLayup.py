@@ -214,7 +214,9 @@ def _preview(stack_data, s):
     model.smooth_chord_reference(span, float(st["chordRefSmoothing"]))
     bounds = fusion_geo.load_bounds(stack.bound_sketches, frame)
     engine.tip_schedule(stack, span, frame, bounds)
-    return engine.section_preview(stack, sec, frame, bounds)
+    out = engine.section_preview(stack, sec, frame, bounds)
+    out.update(sMin=frame["sMin"], sMax=frame["sMax"])
+    return out
 
 
 def _choose_folder(title):
@@ -241,6 +243,8 @@ def _export_stack(data):
     path = _file_dialog(True, "Export layup", "Layup JSON (*.json);;Layer CSV (*.csv)", "layup.json")
     if not path:
         return {"cancelled": True}
+    # a saved layup is a recipe, not tied to this design's body or its seams
+    data = {k: v for k, v in data.items() if k not in ("target", "seamPlan")}
     if path.lower().endswith(".csv"):
         from foil_layup import csvio
         with open(path, "w", newline="", encoding="utf8") as f:

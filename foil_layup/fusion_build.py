@@ -67,12 +67,23 @@ class Builder:
         return sk
 
     def _spline_profile(self, s, loop, name):
+        """Section profile built like a foil section: fitted splines from the
+        upper stop point to the nose and from the nose to the lower stop point,
+        closed by a straight line (the ply's blunt end / the trailing edge)."""
         sk = self._sketch(self._plane(s), "%s @%.1f" % (name, s))
-        pts = adsk.core.ObjectCollection.create()
-        for c, u in loop:
-            pts.add(sk.modelToSketchSpace(to_model(self.frame, s, c, u)))
-        spl = sk.sketchCurves.sketchFittedSplines.add(pts)
-        spl.isClosed = True
+        # upper spline (stop -> nose) and lower spline (nose -> stop) meet at
+        # the nose, which may be pointed deep in the stack; a straight line
+        # closes the stopped end. Same three edges at every station.
+        nose = (len(loop) - 1) // 2
+        model_pts = [sk.modelToSketchSpace(to_model(self.frame, s, c, u)) for c, u in loop]
+        splines = []
+        for part in (model_pts[:nose + 1], model_pts[nose:]):
+            coll = adsk.core.ObjectCollection.create()
+            for p_ in part:
+                coll.add(p_)
+            splines.append(sk.sketchCurves.sketchFittedSplines.add(coll))
+        up, lo = splines
+        sk.sketchCurves.sketchLines.addByTwoPoints(lo.endSketchPoint, up.startSketchPoint)
         sk.isComputeDeferred = False
         sk.isVisible = False
         if sk.profiles.count < 1:
@@ -547,9 +558,9 @@ def generate(stack_data, user_materials, log, progress):
         ctx = dict(b=b, stack=stack, native=native, plan=plan, sections=sections, frame=frame,
                    bounds=bounds, step=step, thickness_span=thickness_span, log=log,
                    progress=progress, skipped=skipped)
-        if st.get("construction", "offset") == "offset":
+        if st.get("construction", "loft") == "offset":
             pending = _build_offsets(ctx)
-        elif frame.get("symmetric", True) and sections[0].s < 0 < sections[-1].s:
+        elif st.get("splitAtCentre") and frame.get("symmetric", True) and sections[0].s < 0 < sections[-1].s:
             # One smooth loft through a whole symmetric wing (hub included) is
             # fragile; each half is built on its own and joined at the centre plane.
             halves = []
@@ -561,7 +572,7 @@ def generate(stack_data, user_materials, log, progress):
             pending = _build_zone(ctx, None)
         # keep-outs: cut every result, keep the grown tool (hidden) for Flatten
         tools = []
-        for tmp, clr, name in keepout_bodies(stack_data, target):
+        for tmp, clr, name in keepout_bodies(stack_data, target, log):
             progress("Keep-out: %s" % name, n_rows + 1, n_rows + 2)
             tool = b.grow(tmp, clr)
             for p in pending:
