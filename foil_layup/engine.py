@@ -48,10 +48,12 @@ def boundary_loop(sec, depth, min_gap, trim=None):
         ys = [p[1] for p in pts]
         if max(xs) - min(xs) < 8 * min_gap or max(ys) - min(ys) < 4 * min_gap:
             return None
-        try:
-            pts = geom.airfoil_resample(geom.chaikin(pts, 2), sec.m)
-        except (ValueError, ZeroDivisionError):
-            return None
+        # keep the natural points plus the rounded cap (resampling would crush a
+        # sub-millimetre cap into a spike); one light rounding pass, then start
+        # at the tip so neighbouring sections line up in the loft
+        pts = geom.chaikin(pts, 1)
+        tip = max(range(len(pts)), key=lambda j: pts[j][0])
+        pts = pts[tip:] + pts[:tip]
     if geom.signed_area(pts) <= 0 or geom.self_intersects(pts):
         return None
     return pts
@@ -75,17 +77,14 @@ def loft_plan(stack, sections, deps, ext, min_gap):
         gap = model.end_gap(nxt.ply_t, stack.settings, nxt.end_gap) if nxt else min_gap
         after, trims = [], []
         for i, sec in enumerate(sections):
-            d = deps[i][ri]["after"]
-            t = _trim_after(d, gap, prev_trim[i])
-            after.append(_nested(boundary_loop(sec, d, gap, t), prev[i]))
+            loop, t = _nested_loop(sec, deps[i][ri]["after"], gap, prev_trim[i], prev[i])
+            after.append(loop)
             trims.append(t)
         plan["after:%s" % row.id] = [(sec.s, after[i]) for i, sec in enumerate(sections)]
         if not row.is_full:
-            full = []
-            for i, sec in enumerate(sections):
-                d = deps[i][ri]["full"]
-                full.append((sec.s, _nested(boundary_loop(sec, d, gap, _trim_after(d, gap, prev_trim[i])), prev[i])))
-            plan["full:%s" % row.id] = full
+            plan["full:%s" % row.id] = [
+                (sec.s, _nested_loop(sec, deps[i][ri]["full"], gap, prev_trim[i], prev[i])[0])
+                for i, sec in enumerate(sections)]
         prev = after
         prev_trim = trims
     for ri, row in enumerate(stack.ext_units):
@@ -98,6 +97,19 @@ NEST_MARGIN = 0.01  # mm
 
 
 TIP_STEP = 0.05  # mm of thickness between the trimmed tips of nested surfaces
+
+
+def _nested_loop(sec, depth, gap, prev_trim, outer):
+    """Boundary loop that sits strictly inside `outer`. If its rounded tip would
+    poke past the outer surface's tip, the tip is stepped back a little more
+    instead of dropping the station. Returns (loop or None, trim used)."""
+    base = _trim_after(depth, gap, prev_trim)
+    for extra in (0.0, 0.05, 0.15, 0.3):
+        trim = [t + extra for t in base]
+        loop = _nested(boundary_loop(sec, depth, gap, trim), outer)
+        if loop is not None:
+            return loop, trim
+    return None, base
 
 
 def _trim_after(depth, gap, prev_trim):

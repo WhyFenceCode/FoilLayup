@@ -233,6 +233,38 @@ def medial_radius(pts, normals, cap=1e6):
     return out
 
 
+def ray_half_thickness(pts, normals, cap=1e6):
+    """Half the distance from each vertex along its inward normal to the
+    opposite side of the loop. On cambered or tilted thin regions the
+    shrinking-ball radius overestimates the room; this catches it."""
+    n = len(pts)
+    segs = []
+    for i in range(n):
+        a, b = pts[i], pts[(i + 1) % n]
+        segs.append((min(a[0], b[0]), max(a[0], b[0]), min(a[1], b[1]), max(a[1], b[1]), a, b, i))
+    out = []
+    for j in range(n):
+        px, py = pts[j]
+        nx, ny = normals[j]
+        best = cap
+        for x0, x1, y0, y1, a, b, i in segs:
+            if i == j or i == (j - 1) % n:
+                continue
+            ex, ey = b[0] - a[0], b[1] - a[1]
+            den = nx * ey - ny * ex
+            if abs(den) < 1e-12:
+                continue
+            rx, ry = a[0] - px, a[1] - py
+            t = (rx * ey - ry * ex) / den
+            if t <= 1e-9 or t >= best:
+                continue
+            u = (rx * ny - ry * nx) / den
+            if -1e-9 <= u <= 1 + 1e-9:
+                best = t
+        out.append(0.5 * best)
+    return out
+
+
 def offset_trimmed(pts, normals, h, depth, trim):
     """Offset a CCW loop inward by per-vertex depth, trimmed continuously.
 
@@ -258,10 +290,13 @@ def offset_trimmed(pts, normals, h, depth, trim):
     start = next(j for j in range(n) if f[j] >= 0 and f[j - 1] < 0)
     out = []
     gap_from = None
+    gap_pts = []  # section points that were cut away in the current gap
     skip_next = False
     for step in range(n):
         j = (start + step) % n
         k = (j + 1) % n
+        if f[j] < 0:
+            gap_pts.append(pts[j])
         if f[j] >= 0:
             if skip_next and out:
                 skip_next = False  # too close to the cut point just placed
@@ -276,9 +311,15 @@ def offset_trimmed(pts, normals, h, depth, trim):
                     out.pop()
                 out.append(cut)
                 gap_from = cut
+                gap_pts = []
             else:          # entering a usable run: cap from gap_from to cut
                 if gap_from is not None:
-                    out.extend(_round_cap(gap_from, cut))
+                    toward = None
+                    if gap_pts:
+                        cx = sum(p[0] for p in gap_pts) / len(gap_pts)
+                        cy = sum(p[1] for p in gap_pts) / len(gap_pts)
+                        toward = (cx, cy)
+                    out.extend(_round_cap(gap_from, cut, toward=toward))
                 out.append(cut)
                 skip_next = dist(cut, P(k)) < close
     if len(out) < 8 or signed_area(out) <= 0:
@@ -286,15 +327,20 @@ def offset_trimmed(pts, normals, h, depth, trim):
     return out, True
 
 
-def _round_cap(a, b, segments=6, bulge=0.5):
-    """Points strictly between a and b on a half-ellipse bulging to the right
-    of a->b (outward for a CCW loop), depth = bulge x half the gap."""
+def _round_cap(a, b, segments=6, bulge=0.5, toward=None):
+    """Points strictly between a and b on a half-ellipse bulging outward
+    (towards `toward`, the middle of what was cut away, else to the right of
+    a->b, which is outward for a CCW loop); depth = bulge x half the gap."""
     m = lerp(a, b, 0.5)
     d = sub(b, a)
     L = norm(d)
     if L < 1e-9:
         return []
     out_n = (d[1] / L, -d[0] / L)
+    if toward is not None:
+        v = unit(sub(toward, m))
+        if dot(v, out_n) > 0.3:  # only if it really points out of the loop
+            out_n = v
     r = 0.5 * L * bulge
     pts = []
     for i in range(1, segments):

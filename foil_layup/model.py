@@ -183,14 +183,23 @@ class Section:
         self.pts = geom.airfoil_resample(loop2d, m)
         self.n = geom.vertex_normals(self.pts)
         self.h = geom.medial_radius(self.pts, self.n)
+        ray = geom.ray_half_thickness(self.pts, self.n)
+        self.h = [min(a_, b_) for a_, b_ in zip(self.h, ray)]
         # The sampled shrinking ball cannot see a sharp corner (it is limited by
         # the neighbour spacing), but no layer fits at a sharp TE: a corner has
         # zero clearance. Otherwise trimming flips between "reaches the TE" and
         # "stops short" from one station to the next and lofts fold over.
+        # A corner is a turning spike next to a nearly straight neighbour; a tight but
+        # smooth leading edge turns steadily over several points and is not one.
+        turn = []
         for j in range(self.m):
             a_ = geom.unit(geom.sub(self.pts[j], self.pts[j - 1]))
             b_ = geom.unit(geom.sub(self.pts[(j + 1) % self.m], self.pts[j]))
-            if geom.dot(a_, b_) < 0.9:  # turns by more than ~25 deg
+            turn.append(math.acos(max(-1.0, min(1.0, geom.dot(a_, b_)))))
+        # (a blunt base has two corners side by side, so compare with either neighbour)
+        for j in range(self.m):
+            nb = min(turn[j - 1], turn[(j + 1) % self.m])
+            if turn[j] > math.radians(25) and turn[j] > 3.0 * nb:
                 self.h[j] = 0.0
         te, le = self.pts[0], self.pts[self.le]
         self.te_pt, self.le_pt = te, le
