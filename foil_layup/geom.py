@@ -462,12 +462,60 @@ def point_in_polygon(p, poly):
 
 
 def dist_point_segment(p, a, b):
-    ab = sub(b, a)
-    L2 = dot(ab, ab)
+    px, py = p[0], p[1]
+    ax, ay = a[0], a[1]
+    ex, ey = b[0] - ax, b[1] - ay
+    L2 = ex * ex + ey * ey
     if L2 < EPS:
-        return dist(p, a)
-    t = max(0.0, min(1.0, dot(sub(p, a), ab) / L2))
-    return dist(p, add(a, scale(ab, t)))
+        return math.hypot(px - ax, py - ay)
+    t = ((px - ax) * ex + (py - ay) * ey) / L2
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    return math.hypot(px - ax - ex * t, py - ay - ey * t)
+
+
+def _min_dist_poly(px, py, poly, best):
+    """Smallest distance from (px, py) to the edges of a closed polygon, or
+    best if that is smaller (plain float arithmetic: this is the hot loop)."""
+    n = len(poly)
+    b2 = best * best
+    ax, ay = poly[-1][0], poly[-1][1]
+    for i in range(n):
+        bx, by = poly[i][0], poly[i][1]
+        ex, ey = bx - ax, by - ay
+        wx, wy = px - ax, py - ay
+        L2 = ex * ex + ey * ey
+        if L2 > EPS:
+            t = (wx * ex + wy * ey) / L2
+            if t < 0.0:
+                t = 0.0
+            elif t > 1.0:
+                t = 1.0
+            dx, dy = wx - ex * t, wy - ey * t
+        else:
+            dx, dy = wx, wy
+        d2 = dx * dx + dy * dy
+        if d2 < b2:
+            b2 = d2
+        ax, ay = bx, by
+    return math.sqrt(b2)
+
+
+def min_dist_polyline(px, py, pts):
+    """Distance from (px, py) to an open polyline."""
+    best = float("inf")
+    for i in range(len(pts) - 1):
+        ax, ay = pts[i][0], pts[i][1]
+        ex, ey = pts[i + 1][0] - ax, pts[i + 1][1] - ay
+        wx, wy = px - ax, py - ay
+        L2 = ex * ex + ey * ey
+        t = (wx * ex + wy * ey) / L2 if L2 > EPS else 0.0
+        t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+        d = math.hypot(wx - ex * t, wy - ey * t)
+        if d < best:
+            best = d
+    if len(pts) == 1:
+        best = math.hypot(px - pts[0][0], py - pts[0][1])
+    return best
 
 
 def signed_distance_polys(p, polys):
@@ -479,11 +527,7 @@ def signed_distance_polys(p, polys):
     for poly in polys:
         if point_in_polygon(p, poly):
             inside = not inside
-        n = len(poly)
-        for i in range(n):
-            d = dist_point_segment(p, poly[i], poly[(i + 1) % n])
-            if d < dmin:
-                dmin = d
+        dmin = _min_dist_poly(p[0], p[1], poly, dmin)
     return dmin if inside else -dmin
 
 
@@ -514,8 +558,9 @@ def clamp_inside(loop, outer, margin):
     and the two surfaces coincide) are left exactly as they are."""
     out = []
     for p in loop:
-        # resampled polylines of coincident curves differ by sag noise (~1e-3 mm)
-        if signed_distance_polys(p, [outer]) >= -0.02:
+        # inside: keep (cheap test first; the distance is only needed outside).
+        # Resampled polylines of coincident curves differ by sag noise (~1e-3 mm).
+        if point_in_polygon(p, outer) or _min_dist_poly(p[0], p[1], outer, 1.0) <= 0.02:
             out.append(p)
             continue
         q = nearest_on_polygon(p, outer)

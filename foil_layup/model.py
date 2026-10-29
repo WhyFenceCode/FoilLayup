@@ -12,6 +12,7 @@ import math
 from . import geom
 
 DEFAULT_SETTINGS = {
+    "loftPruneTol": 0.05,   # mm: drop loft sections a smooth loft reproduces within this
     "construction": "loft",  # 'loft': loft the planned sections (what the preview shows); 'offset': Fusion offsets
     "splitAtCentre": False,  # loft each half separately and join at the centre plane
     "loftStations": 40,     # sections used to loft the 3D layer surfaces
@@ -143,6 +144,13 @@ class Row:
             u.parent = self
             out.append(u)
         return out
+
+    @property
+    def uses_inner_surface(self):
+        """True when the ply can be cut out with its own inner surface: it wraps
+        and is limited at most by the tip drop (applied first as a span cut),
+        so no separate full-thickness surface has to be lofted."""
+        return self.side == "wrap" and (not self.has_user_region or bool(self.outside))
 
     @property
     def is_full(self):

@@ -250,7 +250,7 @@ def loft_plan(stack, sections, deps, ext, min_gap):
             after.append(loop)
             trims.append(t)
         plan["after:%s" % row.id] = [(sec.s, after[i]) for i, sec in enumerate(sections)]
-        if not row.is_full:
+        if not row.uses_inner_surface:
             plan["full:%s" % row.id] = [
                 (sec.s, _nested_loop(sec, deps[i][ri]["full"], gap, prev_trim[i], prev[i])[0])
                 for i, sec in enumerate(sections)]
@@ -302,6 +302,66 @@ def _nested(loop, outer):
     if geom.signed_area(loop) <= 0 or geom.self_intersects(loop):
         return None
     return loop
+
+
+def simplify_run(run, tol=0.05):
+    """Drop stations a surface does not need. A loft is a smooth curve through
+    its sections, so a section is redundant when a cubic through the nearest
+    kept sections on each side (two per side where available) reproduces it
+    to within tol (mm) at every point. Sections of one surface share their
+    point layout, so this is an exact point-by-point check. Ends are kept.
+    run: [(s, loop)] -> subset."""
+    n = len(run)
+    if n <= 4:
+        return run
+    kept = list(range(n))
+    ss = [r[0] for r in run]
+    loops = [r[1] for r in run]
+
+    def predicted_dev(k, nbrs):
+        if any(len(loops[j]) != len(loops[k]) for j in nbrs):
+            return float("inf")
+        x = ss[k]
+        w = []
+        for a in nbrs:  # Lagrange weights at x
+            wa = 1.0
+            for b in nbrs:
+                if b != a:
+                    wa *= (x - ss[b]) / (ss[a] - ss[b])
+            w.append(wa)
+        # distance from each predicted point to the section's actual curve (its
+        # nearby segments), so points sliding along the curve as a ply stop
+        # moves do not count as a shape change
+        lk = loops[k]
+        m = len(lk)
+        worst = 0.0
+        for i in range(m):
+            qx = qy = 0.0
+            for wa, a in zip(w, nbrs):
+                qx += wa * loops[a][i][0]
+                qy += wa * loops[a][i][1]
+            seg = lk[max(0, i - 6):min(m, i + 7)]
+            d = geom.min_dist_polyline(qx, qy, seg)
+            if d > worst:
+                worst = d
+                if worst > tol:
+                    break
+        return worst
+
+    changed = True
+    while changed and len(kept) > 4:
+        changed = False
+        pos = 1
+        while pos < len(kept) - 1:
+            left = kept[max(0, pos - 2):pos]
+            right = kept[pos + 1:pos + 3]
+            if predicted_dev(kept[pos], left + right) <= tol:
+                del kept[pos]
+                changed = True
+                pos += 1  # leave the next one for the next pass (no two in a row)
+            else:
+                pos += 1
+    return [run[k] for k in kept]
 
 
 def longest_run(entries, max_gap=2):

@@ -42,7 +42,8 @@ class Builder:
         self.planes = []
         self.sketches = []
         self._plane_cache = {}
-        self._delete_budget = 90.0   # s spent deleting helper sketches before leaving them hidden
+        self._delete_budget = 0.0    # helper sketches stay hidden in the base feature (deleting is very slow)
+        self.prune_tol = 0.05        # mm, see engine.simplify_run
         self._delete_spent = 0.0
         self._kept_sketches = False
         self.tbm = adsk.fusion.TemporaryBRepManager.get()
@@ -61,6 +62,8 @@ class Builder:
         return pl
 
     def _drop_sketches(self, start):
+        if self._delete_budget <= 0:
+            return
         """Delete helper sketches made since index start, within a time budget;
         past it they stay hidden in the base feature (deleting thousands of
         sketches one by one can take Fusion many minutes)."""
@@ -279,6 +282,8 @@ class Builder:
         run = engine.longest_run(entries)
         if len(run) < 2:
             return None
+        if self.prune_tol > 0:
+            run = engine.simplify_run(run, self.prune_tol)
         n0 = len(self.sketches)
         try:
             return self._robust_loft(_shift_ends(run, inset, *tips), self._spline_profile, name, inset, tips)
@@ -437,6 +442,8 @@ class Builder:
         return self.tbm.createBox(obb)
 
     def cleanup(self):
+        if self._delete_budget <= 0:
+            return   # planes carry the hidden sketches; leave both
         self._drop_sketches(0)
         for pl in self.planes:
             try:
@@ -597,6 +604,7 @@ def generate(stack_data, user_materials, log, progress):
         base.name = "Foil Layup"
         base.startEdit()
     b = Builder(comp, base, frame, log, progress)
+    b.prune_tol = float(st.get("loftPruneTol", 0.05))
     pending = []  # (transient body, name, role, info, material)
     made = []     # (real body, role, info, material)
     skipped = []  # plies that could not be built
@@ -960,8 +968,8 @@ def _build_zone(ctx, zone):
         slot = fill = None
         errors = []
         try:
-            if row.is_full:
-                inner = after
+            if row.uses_inner_surface:
+                inner = after   # cut to its tip end first (limits first), then this
             else:
                 inner = b.loft(zp("full:%s" % row.id), "FL F%d" % (ri + 1), inset, tips)
             mask = None
