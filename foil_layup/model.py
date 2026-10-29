@@ -361,10 +361,9 @@ def station_positions(s_min, s_max, n, inset, profile=None, extra=()):
             else:
                 t = (target - w[i - 1]) / max(w[i] - w[i - 1], 1e-12)
                 base.append(fine[i - 1] + t * (fine[i] - fine[i - 1]))
-    # Keep stations at least 30% of the mean spacing apart: near-identical
-    # sections packed closely make smooth lofts overshoot and self-intersect.
-    # Span-limit stations take priority over the regular ones they crowd out.
-    min_gap = 0.3 * (b - a) / max(n - 1, 1)
+    # Rapid shape changes (a centre pod) need dense stations, so only
+    # near-duplicates are merged. Span-limit stations take priority.
+    min_gap = max(1.0, 0.04 * (b - a) / max(n - 1, 1))
     must = sorted({round(e, 6) for e in extra if a <= e <= b})
     pts = sorted(set([round(v, 6) for v in base]))
     keep = list(must)

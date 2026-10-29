@@ -173,6 +173,7 @@ class Builder:
                 cache[key] = make_profile(entry[0], entry[1], name)
             return cache[key]
 
+        crowded_drops = 0
         for attempt in range(15):
             run = [e for e in run if prof(e) is not None]
             if len(run) < 2:
@@ -204,14 +205,16 @@ class Builder:
                              % (name, stations[e.i0], stations[e.i1], e.msg, stations[drop]))
                     del run[drop]
                 continue
-            if n <= 2:
+            if n <= 2 or crowded_drops >= 3:
                 break
+            crowded_drops += 1
             # every piece lofts on its own: thin out the most crowded section
             k = min(range(1, n - 1), key=lambda i: stations[i + 1] - stations[i - 1])
             self.log("%s: full loft failed (%s); dropping crowded section s=%.1f" % (name, first, stations[k]))
             del run[k]
-        raise FusionError("Could not loft '%s' even after dropping sections; try more loft "
-                          "points, fewer loft stations or a larger min inner gap" % name)
+        raise FusionError("Could not loft '%s' (around s=%.1f..%.1f). Try more loft points per "
+                          "section, a different number of loft stations, or a larger min inner gap"
+                          % (name, run[0][0], run[-1][0]) if run else "Could not loft '%s'" % name)
 
     def loft(self, entries, name, inset=0.0):
         """Transient solid lofted through closed fitted splines at (s, loop2d).
