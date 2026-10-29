@@ -85,7 +85,7 @@ def loft_plan(stack, sections, deps, ext, min_gap):
                 (sec.s, _nested(boundary_loop(sec, deps[i][ri]["full"], gap, allowed[i]), prev[i]))
                 for i, sec in enumerate(sections)]
         prev = after
-        allowed = kept
+        allowed = [_erode(k, sec.m) for k, sec in zip(kept, sections)]
     for ri, row in enumerate(stack.ext_units):
         plan["ext:%s" % row.id] = [(sec.s, boundary_loop(sec, ext[i][ri]["after"], min_gap))
                                    for i, sec in enumerate(sections)]
@@ -93,6 +93,18 @@ def loft_plan(stack, sections, deps, ext, min_gap):
 
 
 NEST_MARGIN = 0.01  # mm
+
+
+def _erode(kept, m, steps=1):
+    """Vertex set minus `steps` vertices at every trimmed end, so the next
+    surface in always stops clearly short of this one (near-touching tips make
+    Fusion's booleans fail). An untrimmed loop stays complete."""
+    if len(kept) >= m:
+        return set(kept)
+    out = set(kept)
+    for _ in range(steps):
+        out = {j for j in out if (j - 1) % m in out and (j + 1) % m in out}
+    return out
 
 
 def _nested(loop, outer):
