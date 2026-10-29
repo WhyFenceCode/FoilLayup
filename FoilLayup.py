@@ -7,6 +7,7 @@ each run is a single undo step.
 import json
 import os
 import sys
+import time
 import traceback
 
 import adsk.core
@@ -86,6 +87,47 @@ def _load_stack():
         return None
 
 
+def _save_result(kind, res):
+    """Keep the last Generate / Flatten result in the design so the palette
+    shows it again next time the design is opened."""
+    try:
+        des = fusion_geo.design()
+        keep = {k: v for k, v in res.items() if k not in ("svg", "log")}
+        keep["when"] = time.strftime("%Y-%m-%d %H:%M")
+        try:
+            keep["design"] = _app().activeDocument.name
+        except Exception:
+            keep["design"] = ""
+        des.attributes.add(APP_ID, "last_" + kind, json.dumps(keep))
+        res["when"], res["design"] = keep["when"], keep["design"]
+    except Exception as e:
+        Log()("Could not save the %s result in the design (%s)" % (kind, e))
+
+
+def _load_result(kind):
+    try:
+        a = fusion_geo.design().attributes.itemByName(APP_ID, "last_" + kind)
+        return json.loads(a.value) if a else None
+    except Exception:
+        return None
+
+
+def _export_report(data):
+    from foil_layup import csvio
+    kind = data.get("kind", "build")
+    res = data.get("result") or _load_result(kind)
+    if not res:
+        return {"error": "Nothing to export yet; run %s first." % ("Generate" if kind == "build" else "Flatten")}
+    name = "foil_layup_%s.csv" % ("build" if kind == "build" else "patterns")
+    path = _file_dialog(True, "Export %s report" % kind, "CSV (*.csv)", name)
+    if not path:
+        return {"cancelled": True}
+    text = csvio.build_report_csv(res) if kind == "build" else csvio.flatten_report_csv(res)
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:  # BOM so Excel reads UTF-8
+        f.write(text)
+    return {"path": path}
+
+
 def _save_stack(stack):
     des = fusion_geo.design()
     des.attributes.add(APP_ID, "stack", json.dumps(stack))
@@ -115,6 +157,8 @@ def _init_payload():
         "mmPerUnit": fusion_geo.mm_per_unit(),
         "preferredUp": fusion_geo.preferred_up(),
         "libraryFile": LIBRARY_FILE,
+        "lastBuild": _load_result("build"),
+        "lastFlatten": _load_result("flatten"),
     }
     payload.update(_lists())
     return payload
@@ -288,6 +332,8 @@ def _handle(action, data):
         return _export_stack(data)
     if action == "importStack":
         return _import_stack()
+    if action == "exportReport":
+        return _export_report(data)
     if action == "openFolder":
         os.startfile(data["folder"])
         return {"ok": True}
@@ -384,6 +430,7 @@ class RunExecute(adsk.core.CommandEventHandler):
                 res = fusion_flat.flatten(data["stack"], lib.get("materials"), data["folder"],
                                           bool(data.get("sketches", True)), log, progress)
             res["log"] = log.lines
+            _save_result("build" if job["action"] == "generate" else "flatten", res)
             prog.hide()
             _send(job["action"] + "Done", res)
         except Exception as e:

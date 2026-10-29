@@ -707,6 +707,14 @@ function bindKeepouts() {
 
 // ------------------------------------------------------------------ build
 function bindBuild() {
+  const exportReport = async (kind) => {
+    try {
+      const r = await call("exportReport", { kind, result: kind === "build" ? S.lastBuild : S.lastFlatten });
+      if (r.path) logLine("Report written to " + r.path);
+    } catch (e) { fail(e); }
+  };
+  $("#exportBuild").addEventListener("click", () => exportReport("build"));
+  $("#exportFlat").addEventListener("click", () => exportReport("flatten"));
   $("#replanSeams").addEventListener("click", () => { S.stack.seamPlan = {}; saveStack(); logLine("Locked seams cleared; they will be re-planned."); });
   $("#generate").addEventListener("click", async () => {
     if (!S.stack.target) return fail(new Error("Pick the foil body first (Setup)."));
@@ -723,18 +731,22 @@ function bindBuild() {
     } catch (e) { fail(e); }
   });
 }
-function onGenerateDone(r) {
+function savedNote(r, restored) {
+  return restored && r.when ? `<p class="hint">Saved result from ${esc(r.when)}${r.design ? " (" + esc(r.design) + ")" : ""}.</p>` : "";
+}
+function onGenerateDone(r, restored = false) {
   $("#busy").textContent = "";
-  (r.log || []).forEach((l) => logLine(l));
+  if (!restored) (r.log || []).forEach((l) => logLine(l));
   if (r.error) return fail(new Error(r.error));
-  if (r.seamPlan) S.stack.seamPlan = r.seamPlan;
+  S.lastBuild = r;
+  if (r.seamPlan && !restored) S.stack.seamPlan = r.seamPlan;
   const sum = (pred, key = "mass_g") => r.bodies.filter(pred).reduce((a, b) => a + (b[key] || 0), 0);
   const isLam = (b) => b.role === "ply" || b.role === "fill";
   const lam = sum(isLam), dry = sum(isLam, "dry_g");
   const core = sum((b) => b.role === "core" || b.role === "corefill" || b.role === "gap");
   const ext = sum((b) => b.role === "external"), extDry = sum((b) => b.role === "external", "dry_g");
   const part = lam + core;
-  let html = `<p>Generated ${r.bodies.length} bodies (one per ply). Finished part <b>${fmt(part, 0)} g</b>; dry fibre <b>${fmt(dry, 0)} g</b>.</p>`;
+  let html = savedNote(r, restored) + `<p>Generated ${r.bodies.length} bodies (one per ply). Finished part <b>${fmt(part, 0)} g</b>; dry fibre <b>${fmt(dry, 0)} g</b>.</p>`;
   if (r.skipped && r.skipped.length) {
     html += `<p class="err">Not built (see log): ${r.skipped.map(esc).join(", ")}. The masses exclude them.</p>`;
   }
@@ -786,10 +798,11 @@ function breakdownTable(b) {
   h += b.byFibre.map((f) => `<tr><th>All ${esc(f.fibre)}</th><td></td><th class="num">${fmt(f.dry_g, 1)}</th><th class="num">${fmt(f.wet_g, 1)}</th></tr>`).join("");
   return h + "</table>";
 }
-function onFlattenDone(r) {
+function onFlattenDone(r, restored = false) {
   $("#busy").textContent = "";
-  (r.log || []).forEach((l) => logLine(l));
+  if (!restored) (r.log || []).forEach((l) => logLine(l));
   if (r.error) return fail(new Error(r.error));
+  S.lastFlatten = r;
   const badge = (b) => {
     if (b.p95_shear_deg > 45 || b.rms_strain_pct > 3) return '<span class="badge bad">split / dart</span>';
     if (b.p95_shear_deg > 30 || b.rms_strain_pct > 1) return '<span class="badge warn">check drape</span>';
@@ -804,8 +817,8 @@ function onFlattenDone(r) {
   for (const m of Object.values(S.mats)) byName[m.name] = m;
   html += breakdownTable(massBreakdown(r.patterns.filter((b) => b.kind !== "ext").map((b) => ({
     material: b.material, fibre: (byName[b.material] || {}).fibre || "", dry_g: b.dry_fabric_g, wet_g: b.with_resin_g }))));
-  html += `<div class="plot" style="margin-top:8px">${r.svg}</div>`;
-  $("#results").innerHTML = html;
+  html += r.svg ? `<div class="plot" style="margin-top:8px">${r.svg}</div>` : `<p class="hint">Overview: _overview.svg in the output folder.</p>`;
+  $("#flatResults").innerHTML = savedNote(r, restored) + html;
   const a = $("#openFolder");
   if (a) a.addEventListener("click", (e) => { e.preventDefault(); call("openFolder", { folder: r.folder }).catch(fail); });
 }
@@ -844,5 +857,7 @@ async function start() {
   bindKeepouts();
   bindBuild();
   renderAll();
+  if (S.init.lastBuild) onGenerateDone(S.init.lastBuild, true);
+  if (S.init.lastFlatten) onFlattenDone(S.init.lastFlatten, true);
 }
 document.addEventListener("DOMContentLoaded", start);

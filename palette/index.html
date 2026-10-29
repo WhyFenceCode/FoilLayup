@@ -176,7 +176,14 @@
     </div>
     <p class="hint">Generate copies the body, splits it into layers and core in one Base Feature (one undo step) and replaces a previous run. Flatten asks for an output folder.</p>
   </div>
-  <div class="card"><h3>Results</h3><div id="results"></div></div>
+  <div class="card">
+    <div class="row"><h3 class="grow">Results</h3>
+      <button id="exportBuild" class="ghost">Export build report (CSV)</button>
+      <button id="exportFlat" class="ghost">Export pattern report (CSV)</button></div>
+    <p class="hint">Results are saved in the design and shown again when it is reopened.</p>
+    <div id="results"></div>
+    <div id="flatResults"></div>
+  </div>
   <div class="card"><h3>Log</h3><pre id="log"></pre></div>
 </section>
 </main>
