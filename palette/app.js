@@ -694,28 +694,32 @@ function onGenerateDone(r) {
   (r.log || []).forEach((l) => logLine(l));
   if (r.error) return fail(new Error(r.error));
   if (r.seamPlan) S.stack.seamPlan = r.seamPlan;
-  const sum = (pred) => r.bodies.filter(pred).reduce((a, b) => a + (b.mass_g || 0), 0);
-  const plies = sum((b) => b.role === "ply"), fills = sum((b) => b.role === "fill"),
-    core = sum((b) => b.role === "core" || b.role === "corefill"), ext = sum((b) => b.role === "external");
-  const part = plies + fills + core;
-  let html = `<p>Generated ${r.bodies.length} bodies (one per ply). Part mass <b>${fmt(part, 0)} g</b>.</p>`;
+  const sum = (pred, key = "mass_g") => r.bodies.filter(pred).reduce((a, b) => a + (b[key] || 0), 0);
+  const isLam = (b) => b.role === "ply" || b.role === "fill";
+  const lam = sum(isLam), dry = sum(isLam, "dry_g");
+  const core = sum((b) => b.role === "core" || b.role === "corefill" || b.role === "gap");
+  const ext = sum((b) => b.role === "external"), extDry = sum((b) => b.role === "external", "dry_g");
+  const part = lam + core;
+  let html = `<p>Generated ${r.bodies.length} bodies (one per ply). Finished part <b>${fmt(part, 0)} g</b>; dry fibre <b>${fmt(dry, 0)} g</b>.</p>`;
   if (r.skipped && r.skipped.length) {
-    html += `<p class="err">Not built (see log): ${r.skipped.map(esc).join(", ")}. The part mass excludes them.</p>`;
+    html += `<p class="err">Not built (see log): ${r.skipped.map(esc).join(", ")}. The masses exclude them.</p>`;
   }
-  html += `<table class="tbl"><tr><th>Body</th><th>Role</th><th>Material</th><th>Volume cm³</th><th>Mass g</th></tr>` +
-    r.bodies.map((b) => `<tr><td>${esc(b.name)}</td><td>${esc(b.role)}</td><td>${esc(b.material)}</td><td class="num">${fmt(b.volume_cm3, 2)}</td><td class="num">${fmt(b.mass_g, 1)}</td></tr>`).join("") + "</table>";
+  html += `<table class="tbl"><tr><th>Body</th><th>Role</th><th>Material</th><th>Volume cm³</th><th>Dry fibre g</th><th>With resin g</th></tr>` +
+    r.bodies.map((b) => `<tr><td>${esc(b.name)}</td><td>${esc(b.role === "gap" ? "drape gap (core)" : b.role)}</td><td>${esc(b.material)}</td>
+      <td class="num">${fmt(b.volume_cm3, 2)}</td><td class="num"><b>${b.dry_g == null ? "" : fmt(b.dry_g, 1)}</b></td>
+      <td class="num">${fmt(b.mass_g, 1)}</td></tr>`).join("") + "</table>";
   if (r.seams && r.seams.length) {
     html += `<h3>Seams</h3><table class="tbl"><tr><th>Ply</th><th>Seam</th><th></th></tr>` +
       r.seams.map((s) => `<tr><td>${esc(s.piece)} ${esc(s.label)}</td><td>${esc(s.msg)}</td><td>${s.ok ? '<span class="badge ok">ok</span>' : '<span class="badge warn">check</span>'}</td></tr>`).join("") + "</table>";
   }
   html += `<h3>Mass</h3><table class="tbl mass">
-    <tr><td>Plies (laminate)</td><td class="num">${fmt(plies, 1)} g</td></tr>
-    ${fills ? `<tr><td>Fills</td><td class="num">${fmt(fills, 1)} g</td></tr>` : ""}
-    <tr><td>Core</td><td class="num">${fmt(core, 1)} g</td></tr>
+    <tr><td>Dry fibre (all plies)</td><td class="num"><b>${fmt(dry, 1)} g</b></td></tr>
+    <tr><td>Resin in the laminate</td><td class="num">${fmt(lam - dry, 1)} g</td></tr>
+    <tr><td>Laminate with resin</td><td class="num">${fmt(lam, 1)} g</td></tr>
+    <tr><td>Core (incl. drape gaps)</td><td class="num">${fmt(core, 1)} g</td></tr>
     <tr><th>Finished part</th><th class="num">${fmt(part, 1)} g</th></tr>
-    ${ext ? `<tr><td>External layers (removed after cure)</td><td class="num">${fmt(ext, 1)} g</td></tr>
-    <tr><td>Total in the bag</td><td class="num">${fmt(part + ext, 1)} g</td></tr>` : ""}
-  </table><p class="hint">From body volumes and laminate densities in the material library (cured laminate incl. resin at the material's Vf).</p>`;
+    ${ext ? `<tr><td>External layers (removed after cure), dry</td><td class="num">${fmt(extDry, 1)} g</td></tr>` : ""}
+  </table><p class="hint">Dry fibre = ply area × fabric g/m² (area = body volume ÷ ply thickness). With resin uses the laminate density at the material's Vf in the library.</p>`;
   $("#results").innerHTML = html;
 }
 function onFlattenDone(r) {
@@ -728,9 +732,9 @@ function onFlattenDone(r) {
     return '<span class="badge ok">ok</span>';
   };
   let html = `<p>${r.patterns.length} patterns written to <a href="#" id="openFolder">${esc(r.folder)}</a> · roll length ${fmt(r.rollLength / S.k, 0)} ${S.units}</p>`;
-  html += `<table class="tbl"><tr><th>Piece</th><th>Material</th><th>Angle</th><th>Seam</th><th>Area m²</th><th>Size (mm)</th><th>Fibre strain rms %</th><th>Shear p95 °</th><th>Drape</th></tr>` +
+  html += `<table class="tbl"><tr><th>Piece</th><th>Material</th><th>Angle</th><th>Seam</th><th>Area m²</th><th>Dry fibre g</th><th>With resin g</th><th>Size (mm)</th><th>Fibre strain rms %</th><th>Shear p95 °</th><th>Drape</th></tr>` +
     r.patterns.map((b) => `<tr><td>${esc(b.label)}</td><td>${esc(b.material)}</td><td class="num">${b.angle_deg}</td><td>${esc(b.seam)}</td>
-      <td class="num">${fmt(b.area_m2, 4)}</td><td class="num">${fmt(b.length_mm, 0)} × ${fmt(b.width_mm, 0)}</td>
+      <td class="num">${fmt(b.area_m2, 4)}</td><td class="num"><b>${fmt(b.dry_fabric_g, 1)}</b></td><td class="num">${fmt(b.with_resin_g, 1)}</td><td class="num">${fmt(b.length_mm, 0)} × ${fmt(b.width_mm, 0)}</td>
       <td class="num">${fmt(b.rms_strain_pct, 2)}</td><td class="num">${fmt(b.p95_shear_deg, 1)}</td><td>${badge(b)}</td></tr>`).join("") + "</table>";
   html += `<div class="plot" style="margin-top:8px">${r.svg}</div>`;
   $("#results").innerHTML = html;

@@ -21,6 +21,63 @@ def build_sections(raw, m, chord_smoothing=0.05):
     return out
 
 
+def tip_schedule(stack, sections, frame):
+    """Spanwise ply drops towards the tips.
+
+    Walking out from the root, the thicker side's stack plus half the minimum
+    core (tipCoreMin) must fit in the foil's half thickness. When it no longer
+    does, plies end in this order: limited plies (spar caps, bands, one-sided)
+    innermost first, then the other inner plies innermost first. The outermost
+    ply never drops; it runs to the tip. Sets unit.tip_end (span_ref) and
+    returns [(unit, end)] in drop order.
+    """
+    st = stack.settings
+    units = stack.units
+    for u in units:
+        u.tip_end = None
+    if not st.get("tipSchedule", True) or len(units) < 2 or len(sections) < 2:
+        return []
+    core_half = float(st.get("tipCoreMin", 1.0)) / 2.0
+    pts = sorted((model.span_ref(sec.s, frame), sec.thickness / 2.0) for sec in sections)
+    merged = []
+    for sr, hv in pts:
+        if merged and sr - merged[-1][0] < 0.5:
+            merged[-1] = (merged[-1][0], min(merged[-1][1], hv))  # both halves must fit
+        else:
+            merged.append((sr, hv))
+    limited = [u for u in units[1:] if u.has_user_region or u.side != "wrap"]
+    others = [u for u in units[1:] if u not in limited]
+    order = list(reversed(limited)) + list(reversed(others))
+    present = list(units)
+
+    def need():
+        top = sum(u.t for u in present if u.side in ("wrap", "top"))
+        bot = sum(u.t for u in present if u.side in ("wrap", "bottom"))
+        return max(top, bot) + core_half
+
+    ends = []
+    room = float("inf")
+    for (s0, h0), (s1, h1) in zip(merged, merged[1:]):
+        n = max(1, int((s1 - s0) / 1.0))  # 1 mm steps
+        for k in range(n + 1):
+            t = k / n
+            sr = s0 + (s1 - s0) * t
+            room = min(room, h0 + (h1 - h0) * t)  # thickness only ever shrinks outward
+            while order and need() > room:
+                u = order.pop(0)
+                present.remove(u)
+                u.tip_end = sr
+                ends.append((u, sr))
+    return ends
+
+
+def log_tip_schedule(ends, frame, log):
+    if not ends or not log:
+        return
+    where = "from centre" if frame.get("symmetric", True) else "from root"
+    log("Tip ply drops (|s| %s): " % where + ", ".join("%s @ %.0f mm" % (u.name, e) for u, e in ends))
+
+
 def depth_tables(stack, sections, frame, bounds):
     ramp = float(stack.settings["dropRatio"])
     deps = [model.section_depths(sec, stack.units, frame, bounds, ramp) for sec in sections]
@@ -167,16 +224,17 @@ def side_mask_quads(sec, side, extend):
     return [a, b, c, e]
 
 
-def region_planform_polys(row, sections, frame, extend):
+def region_planform_polys(row, sections, frame, extend, include_tip=True):
     """Planform (s, c) polygons for the row's chord/span limits (not bounds).
     Returns None if the row has neither."""
-    if not (row.chord or row.span):
+    span = row.eff_span if include_tip else row.span
+    if not (row.chord or span):
         return None
     def inside_span(s):
-        if not row.span:
+        if not span:
             return True
         sr = model.span_ref(s, frame)
-        s0, s1 = row.span
+        s0, s1 = span
         return (s0 is None or sr >= s0 - 1e-6) and (s1 is None or sr <= s1 + 1e-6)
 
     runs, cur = [], []
@@ -307,6 +365,8 @@ def flatten_all(stack, sections, frame, bounds, keepout_fn=None, progress=None, 
                     "seam": pc.seam["msg"] if pc.seam else "none",
                     "area_m2": round(area_m2, 5),
                     "dry_fabric_g": round(area_m2 * gsm, 1),
+                    # cured laminate (fibre + resin at the material's Vf): area x thickness x density
+                    "with_resin_g": round(area_m2 * (pc.ply.t if pc.ply else pc.row.t) * mat["density"], 1),
                     "length_mm": round(part["bbox"][2] - part["bbox"][0], 1),
                     "width_mm": round(part["bbox"][3] - part["bbox"][1], 1),
                     "p95_strain_pct": round(part["stats"]["maxStrain"] * 100, 2),

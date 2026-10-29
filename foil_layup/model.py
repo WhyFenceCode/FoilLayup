@@ -22,6 +22,8 @@ DEFAULT_SETTINGS = {
     "minGap": 0.15,         # mm: minimum half-thickness kept inside an inner surface
     "chordRefSmoothing": 0.05,  # chord limits use LE/TE smoothed over this share of
                                 # the span, so a centre hub does not drag bands sideways
+    "tipSchedule": True,    # drop plies spanwise towards the tips so the stack always fits
+    "tipCoreMin": 1.0,      # mm: core thickness at which inner plies start to end
     "plyEndRatio": 1.0,     # inner plies stop where the space inside the layers above
                             # them is less than ratio x ply thickness (no feather edges)
     "tipInset": 0.4,        # mm: first/last station inset from the body ends
@@ -101,14 +103,28 @@ class Row:
         eg = data.get("endGap")
         self.end_gap = float(eg) if eg not in (None, "") else None  # mm, overrides plyEndRatio
         self.splits = [float(v) for v in (data.get("splits") or [])]
+        self.tip_end = None  # span_ref where the tip drop schedule ends this ply
         self.plies = [Ply(self, i, a) for i, a in enumerate(parse_angles(data.get("angles", "0"), self.count))]
-        if external and (self.side != "wrap" or self.has_region):
+        if external and (self.side != "wrap" or self.has_user_region):
             # External consumables are modelled as full wraps.
             self.side, self.span, self.chord, self.bound_sketch = "wrap", None, None, ""
 
     @property
-    def has_region(self):
+    def has_user_region(self):
+        """Limits set in the stack editor (span, chord, bound sketch)."""
         return bool(self.span or self.chord or self.bound_sketch)
+
+    @property
+    def has_region(self):
+        return self.has_user_region or self.tip_end is not None
+
+    @property
+    def eff_span(self):
+        """Span limits including the automatic tip end."""
+        s0, s1 = self.span if self.span else (None, None)
+        if self.tip_end is not None:
+            s1 = self.tip_end if s1 is None else min(s1, self.tip_end)
+        return None if s0 is None and s1 is None else (s0, s1)
 
     def split(self, materials):
         """One single-ply unit per ply, so every ply becomes its own body and ends
@@ -266,8 +282,8 @@ def region_field(row, sec, frame, bounds, chord_at=None):
     out = []
     for j in range(sec.m):
         f = float("inf")
-        if row.span:
-            s0, s1 = row.span
+        if row.eff_span:
+            s0, s1 = row.eff_span
             if s0 is not None:
                 f = min(f, sr - s0)
             if s1 is not None:

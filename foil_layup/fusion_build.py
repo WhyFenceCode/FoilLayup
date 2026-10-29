@@ -318,11 +318,24 @@ class Builder:
             raise FusionError("%s (%s) failed" % (what or "boolean", op))
         return target
 
-    def offset(self, tmp, mm, what=""):
-        """Transient copy of tmp with every face offset by mm (+ out, - in),
-        using Fusion's own offset (exact, handles hubs and fillets)."""
+    def offset(self, tmp, mm, what="", skin_only=True):
+        """Transient copy of tmp with its faces offset by mm (+ out, - in),
+        using Fusion's own offset (exact, handles hubs and fillets).
+        skin_only leaves planar faces that stand along the up axis (stop
+        walls, span-end cuts, a blunt trailing-edge base) where they are, so
+        the skin offsets meet them instead of the kernel offsetting tiny faces."""
         real = self.materialize(tmp, "FL offset")
         faces = [real.faces.item(i) for i in range(real.faces.count)]
+        if skin_only:
+            up = vec(self.frame["U"])
+            skin = []
+            for f in faces:
+                pl = adsk.core.Plane.cast(f.geometry)
+                if pl is not None and abs(pl.normal.dotProduct(up)) < 0.1:
+                    continue
+                skin.append(f)
+            if skin:
+                faces = skin
         inp = self.comp.features.offsetFacesFeatures.createInput(
             faces, adsk.core.ValueInput.createByReal(mm * CM))
         if self.base:
@@ -511,6 +524,7 @@ def generate(stack_data, user_materials, log, progress):
     frame["bbox_local"] = (lo, hi)
     bounds = load_bounds(stack.bound_sketches, frame, log)
     _dump_debug(stack_data, user_materials, frame, raw, bounds, log)
+    engine.log_tip_schedule(engine.tip_schedule(stack, sections, frame), frame, log)
     deps, ext = engine.depth_tables(stack, sections, frame, bounds)
     plan = engine.loft_plan(stack, sections, deps, ext, float(st["minGap"]))
     pieces, _d, _e = engine.plan_pieces(stack, sections, frame, bounds, log, stack_data.get("seamPlan"))
@@ -600,16 +614,26 @@ def generate(stack_data, user_materials, log, progress):
             vol = body.physicalProperties.volume  # cm3
         except Exception:
             vol = 0.0
+        lam = vol * mat["density"] / 1000.0
+        dry = None
+        t = info.get("t") if isinstance(info, dict) else None
+        if role in ("ply", "external", "fill") and t and mat.get("gsm"):
+            area_m2 = vol / (t / 10.0) * 1e-4  # volume / thickness
+            dry = area_m2 * mat["gsm"]
         report.append({
             "name": body.name, "role": role, "material": mat["name"],
-            "volume_cm3": round(vol, 3), "mass_g": round(vol * mat["density"] / 1000.0, 2),
+            "volume_cm3": round(vol, 3), "mass_g": round(lam, 2),
+            "dry_g": round(dry, 2) if dry is not None else None,
         })
-    part = sum(r["mass_g"] for r in report if r["role"] in ("ply", "fill", "core", "corefill"))
+    plies = [r for r in report if r["role"] in ("ply", "fill")]
+    lam_plies = sum(r["mass_g"] for r in plies)
+    dry_plies = sum(r["dry_g"] or 0 for r in plies)
+    core = sum(r["mass_g"] for r in report if r["role"] in ("core", "corefill", "gap"))
+    part = lam_plies + core
     ext = sum(r["mass_g"] for r in report if r["role"] == "external")
-    log("Mass: plies %.1f g, core %.1f g, finished part %.1f g%s" % (
-        sum(r["mass_g"] for r in report if r["role"] == "ply"),
-        sum(r["mass_g"] for r in report if r["role"] in ("core", "corefill")), part,
-        (", external layers %.1f g" % ext) if ext else ""))
+    log("Mass: dry fibre %.1f g, resin %.1f g, laminate %.1f g, core %.1f g, finished part %.1f g%s" % (
+        dry_plies, lam_plies - dry_plies, lam_plies, core, part,
+        (", external layers %.1f g (removed after cure)" % ext) if ext else ""))
     return {"bodies": report, "seamPlan": seam_plan, "skipped": skipped,
             "seams": [{"piece": pc.id, "label": pc.label, "msg": pc.seam["msg"], "ok": pc.seam["ok"]}
                       for pc in pieces if pc.seam],
@@ -635,17 +659,26 @@ def _dump_debug(stack_data, user_materials, frame, raw, bounds, log):
         log("Debug dump skipped (%s)" % e)
 
 
-def _stop_prism(b, entries, depth, name):
+def _stop_prism(b, entries, depth, name, sections=None, te_margin=0.0, drop_ends=0):
     """Vertical prism over the planform where a surface exists: from far ahead
     of the LE back to its trimmed tip at each station, spanning the stations
     where it exists. Cutting the surface above with it before offsetting
     removes the regions too thin for the next ply, so the offset never fails
     there and the ply ends bluntly at this line."""
+    te_of = {round(sec.s, 6): sec.te_pt[0] for sec in sections or []}
     present = [(s_, loop) for s_, loop in entries if loop is not None]
+    if drop_ends:
+        present = present[drop_ends:-drop_ends]
     if len(present) < 2:
         return None
     front = min(min(p[0] for p in loop) for _s, loop in present) - BIG_EXTEND
-    aft = [(s_, max(p[0] for p in loop)) for s_, loop in present]
+    aft = []
+    for s_, loop in present:
+        c = max(p[0] for p in loop)
+        te = te_of.get(round(s_, 6))
+        if te is not None:
+            c = min(c, te - te_margin)  # keep the stop wall clear of the trailing edge
+        aft.append((s_, c))
     poly = aft + [(present[-1][0], front), (present[0][0], front)]
     return b.extrude_planform([poly], name, depth)
 
@@ -670,19 +703,41 @@ def _build_offsets(ctx):
             continue
         key = "full:%s" % row.id if ("full:%s" % row.id) in plan else "after:%s" % row.id
         try:
-            prism = _stop_prism(b, plan[key], thickness_span, "FL stop %d" % (ri + 1))
-            inner = None
-            if prism is not None:
+            inner, no_room = None, False
+            last = None
+            # stop line clear of the trailing edge; on failure move it further
+            # forward and pull the ends back from the wingtips, then retry
+            for te_margin, drop_ends in ((max(1.0, 4 * row.t), 0), (2.5, 1), (5.0, 3)):
+                prism = _stop_prism(b, plan[key], thickness_span, "FL stop %d" % (ri + 1),
+                                    sections, te_margin, drop_ends)
+                if prism is None:
+                    no_room = True
+                    break
                 base_ = b.copy(cur)
-                b.boolean(base_, prism, "intersect", "%s: trim where the next ply no longer fits" % label)
-                inner = b.offset(base_, -row.t, "%s: inner surface" % label)
+                try:
+                    b.boolean(base_, prism, "intersect", "%s: trim where the next ply no longer fits" % label)
+                    inner = b.offset(base_, -row.t, "%s: inner surface" % label)
+                    if te_margin > max(1.0, 4 * row.t) or drop_ends:
+                        log("%s: stop line moved %.1f mm off the trailing edge%s to make the offset work"
+                            % (label, te_margin, " and %d stations back from the tips" % drop_ends if drop_ends else ""))
+                    break
+                except FusionError as e:
+                    last = e
+            if inner is None and not no_room:
+                raise last
             mask = None
             if row.side != "wrap":
                 quads = [(sec.s, engine.side_mask_quads(sec, row.side, sec.chord + BIG_EXTEND))
                          for sec in sections]
                 mask = b.loft_polys(quads, "FL side mask %d" % (ri + 1))
-            region = (_region_tool(b, row, sections, frame, bounds, thickness_span, ri)
-                      if row.has_region else None)
+            region = (_region_tool(b, row, sections, frame, bounds, thickness_span, ri, include_tip=False)
+                      if row.has_user_region else None)
+            tip = None
+            if row.tip_end is not None:  # spanwise end from the tip drop schedule
+                if frame.get("symmetric", True):
+                    tip = b.span_box(-row.tip_end, row.tip_end)
+                else:
+                    tip = b.span_box(-1e9, frame["sMin"] + row.tip_end)
         except FusionError as e:
             log("WARNING: %s could not be built and was skipped (%s)" % (label, e))
             skipped.append(label)
@@ -700,6 +755,10 @@ def _build_offsets(ctx):
             log("WARNING: %s could not be built and was skipped (%s)" % (label, "; ".join(errors)))
             skipped.append(label)
             continue
+        if tip is not None:
+            for part in (slot, fill):
+                if part is not None and _has_volume(part):
+                    b.boolean(part, tip, "intersect", "%s: tip end" % label)
         if _has_volume(slot):
             pending.append((slot, label, "ply", info, row.material))
         else:
@@ -711,22 +770,39 @@ def _build_offsets(ctx):
                 m = stack.materials[row.outside]
                 pending.append((fill, "%s fill %s" % (label, m["name"]), "fill",
                                 dict(info, material=m["id"]), m))
-        # the next surface: where this ply (or its fill) sits the inner surface,
-        # elsewhere the inner layers move outward over the step
+        # The next surface is always the clean full-depth offset (offsetting a
+        # pocket one ply deep would collapse its walls). Where a limited ply is
+        # absent, the strip it leaves is a "drape gap": in the part the inner
+        # layers drape outward and the core grows by that volume, so it is
+        # counted with the core material and the part mass stays right.
         if inner is None:
             cur = None
-        elif row.is_full or row.outside:
-            cur = inner
         else:
-            nxt = b.copy(cur)
-            try:
-                if _has_volume(slot):
-                    b.boolean(nxt, slot, "cut", "%s: surface for the next ply" % label)
-                cur = nxt
-            except FusionError as e:
-                log("WARNING: %s: inner layers cannot follow its edges (%s); "
-                    "using the full-depth surface" % (label, e))
-                cur = inner
+            nxt = inner
+            if tip is not None:
+                # past the ply's end the layers inside move outward into its place
+                try:
+                    nxt = b.copy(inner)
+                    b.boolean(nxt, tip, "intersect", "%s: surface inside the ply end" % label)
+                    beyond = b.copy(cur)
+                    b.boolean(beyond, tip, "cut", "%s: surface past the ply end" % label)
+                    if _has_volume(beyond):
+                        b.boolean(nxt, beyond, "union", "%s: step at the ply end" % label)
+                except FusionError as e:
+                    log("WARNING: %s: layers inside cannot step out past its end (%s)" % (label, e))
+                    nxt = inner
+            if row.side != "wrap" or (row.has_user_region and not row.outside):
+                try:
+                    gap = b.copy(cur)
+                    b.boolean(gap, nxt, "cut", "%s: drape gap" % label)
+                    for part in (slot, fill):
+                        if part is not None and _has_volume(part):
+                            b.boolean(gap, part, "cut", "%s: drape gap" % label)
+                    if _has_volume(gap):
+                        pending.append((gap, "%s drape gap" % label, "gap", info, stack.core_material))
+                except FusionError as e:
+                    log("%s: drape gap not built (%s)" % (label, e))
+            cur = nxt
     if cur is not None and _has_volume(cur):
         for p in [p for p in pending if p[2] == "corefill"]:
             try:
@@ -736,12 +812,16 @@ def _build_offsets(ctx):
                 log("Could not join %s into the core (%s); kept separate" % (p[1], e))
         pending.append((cur, stack.core_name, "core", {"material": stack.core_material["id"]},
                         stack.core_material))
+    # external consumables: lofted outward offsets (an outward offset of the
+    # whole body fails at the singular wingtip point)
     prev = b.copy(native)
     for ri, row in enumerate(stack.ext_units):
         progress("External %d/%d: %s" % (ri + 1, len(stack.ext_units), row.name), n_rows, n_rows + 2)
         name = "FX%02d %s" % (ri + 1, row.name)
         try:
-            outer = b.offset(b.copy(prev), row.t, name)
+            outer = b.loft(plan["ext:%s" % row.id], "FL E%d" % (ri + 1), ctx["step"] * (ri + 1))
+            if outer is None:
+                continue
             keep_outer = b.copy(outer)
             b.boolean(outer, prev, "cut", name)
         except FusionError as e:
@@ -749,7 +829,8 @@ def _build_offsets(ctx):
             skipped.append(name)
             continue
         pending.append((outer, name, "external",
-                        {"row": row.id, "name": row.name, "material": row.material["id"]}, row.material))
+                        {"row": row.id, "name": row.name, "material": row.material["id"], "t": row.t},
+                        row.material))
         prev = keep_outer
     return pending
 
@@ -961,9 +1042,9 @@ def _has_volume(tmp):
         return False
 
 
-def _region_tool(b, row, sections, frame, bounds, depth, ri):
+def _region_tool(b, row, sections, frame, bounds, depth, ri, include_tip=True):
     """Transient solid covering the row's chord/span limits and bound sketch."""
-    polys = engine.region_planform_polys(row, sections, frame, BIG_EXTEND)
+    polys = engine.region_planform_polys(row, sections, frame, BIG_EXTEND, include_tip)
     tool = b.extrude_planform(polys, "FL region %d" % (ri + 1), depth) if polys else None
     if row.bound_sketch:
         bp = bounds.get(row.bound_sketch) or []
