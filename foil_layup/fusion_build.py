@@ -12,6 +12,8 @@ Body logic, from the outside in (S_k = lofted inner surface after row k):
   external:     ext_k = E_k - E_{k-1}         (E_0 = the original body)
 """
 import json
+import os
+
 import adsk.core
 import adsk.fusion
 
@@ -174,6 +176,7 @@ class Builder:
             return cache[key]
 
         crowded_drops = 0
+        decimated = False
         for attempt in range(15):
             run = [e for e in run if prof(e) is not None]
             if len(run) < 2:
@@ -205,8 +208,17 @@ class Builder:
                              % (name, stations[e.i0], stations[e.i1], e.msg, stations[drop]))
                     del run[drop]
                 continue
-            if n <= 2 or crowded_drops >= 3:
+            if n <= 2:
                 break
+            if crowded_drops >= 3:
+                if decimated or n < 8:
+                    break
+                # every piece lofts but the whole does not: try every other station
+                decimated = True
+                self.log("%s: full loft still failing; trying every other section (%d -> %d)"
+                         % (name, n, (n + 1) // 2 + (0 if n % 2 else 1)))
+                run = [e for i, e in enumerate(run) if i % 2 == 0 or i == n - 1]
+                continue
             crowded_drops += 1
             # every piece lofts on its own: thin out the most crowded section
             k = min(range(1, n - 1), key=lambda i: stations[i + 1] - stations[i - 1])
@@ -462,6 +474,7 @@ def generate(stack_data, user_materials, log, progress):
     lo[0], hi[0] = frame["sMin"], frame["sMax"]
     frame["bbox_local"] = (lo, hi)
     bounds = load_bounds(stack.bound_sketches, frame, log)
+    _dump_debug(stack_data, user_materials, frame, raw, bounds, log)
     deps, ext = engine.depth_tables(stack, sections, frame, bounds)
     plan = engine.loft_plan(stack, sections, deps, ext, float(st["minGap"]))
     pieces, _d, _e = engine.plan_pieces(stack, sections, frame, bounds, log, stack_data.get("seamPlan"))
@@ -630,6 +643,25 @@ def generate(stack_data, user_materials, log, progress):
             "seams": [{"piece": pc.id, "label": pc.label, "msg": pc.seam["msg"], "ok": pc.seam["ok"]}
                       for pc in pieces if pc.seam],
             "frame": {k: frame[k] for k in ("spanAxis", "upAxis", "chordAxis", "sMin", "sMax", "hand")}}
+
+
+def _dump_debug(stack_data, user_materials, frame, raw, bounds, log):
+    """Save what the engine works from, so a failing run can be reproduced
+    outside Fusion (APPDATA/FoilLayup/last_generate.json)."""
+    try:
+        folder = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "FoilLayup")
+        os.makedirs(folder, exist_ok=True)
+        data = {
+            "stack": stack_data,
+            "userMaterials": user_materials or [],
+            "frame": {k: v for k, v in frame.items() if k != "bbox_local"},
+            "raw": [[s, loop] for s, loop in raw],
+            "bounds": bounds,
+        }
+        with open(os.path.join(folder, "last_generate.json"), "w", encoding="utf8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        log("Debug dump skipped (%s)" % e)
 
 
 def _ply_body(b, outer, inner, mask, region, with_fill, order, label, side):
