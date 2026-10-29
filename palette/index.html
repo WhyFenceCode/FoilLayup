@@ -46,6 +46,7 @@
       <div class="fields">
         <label title="Loft: every layer surface is lofted through exactly the sections the preview draws (same point layout at every station, blunt ends at ply stops). Offset: Fusion offsets of the body; experimental.">3D method <select data-set="construction"><option value="loft">loft the previewed sections (recommended)</option><option value="offset">Fusion offsets (experimental)</option></select></label>
         <label>Loft stations <input type="number" data-set="loftStations" min="8" max="150"></label>
+        <label title="Sections are added wherever two would be further apart than this, so the lofted layer surfaces follow the body closely along the whole span (sparse sections let them drift by a ply thickness). Unneeded sections are skipped again by the loft section tolerance.">Max span between sections <span class="u"></span> <input type="number" data-set="maxStationGap" data-len min="2" step="any"></label>
         <label title="Each layer surface keeps only the sections a smooth loft needs: a section that its neighbours already reproduce within this tolerance is skipped. Larger = faster Generate, slightly less exact.">Loft section tolerance (mm) <input type="number" data-set="loftPruneTol" min="0" max="0.5" step="0.01"></label>
         <label>Loft points / section <input type="number" data-set="loftPoints" min="40" max="400" step="2"></label>
         <label>Ply drop ramp (length : thickness) <input type="number" data-set="dropRatio" min="1" step="any"></label>

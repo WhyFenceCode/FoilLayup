@@ -253,7 +253,7 @@ def section_profile(loop):
     return (min(cs), max(cs), max(us) - min(us))
 
 
-def sample_sections(native_body, frame, n, inset, extra=(), progress=None):
+def sample_sections(native_body, frame, n, inset, extra=(), progress=None, max_gap=20.0):
     """Stations clustered at the tips and where the shape changes fast."""
     cache = {}
 
@@ -267,7 +267,7 @@ def sample_sections(native_body, frame, n, inset, extra=(), progress=None):
         lp = get(s)
         return section_profile(lp) if lp else (0.0, 0.0, 0.0)
 
-    positions = model.station_positions(frame["sMin"], frame["sMax"], n, inset, profile, extra)
+    positions = model.station_positions(frame["sMin"], frame["sMax"], n, inset, profile, extra, max_gap)
     raw = []
     for k, s in enumerate(positions):
         if progress:

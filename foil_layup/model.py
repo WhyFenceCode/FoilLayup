@@ -16,6 +16,8 @@ DEFAULT_SETTINGS = {
     "construction": "loft",  # 'loft': loft the planned sections (what the preview shows); 'offset': Fusion offsets
     "splitAtCentre": False,  # loft each half separately and join at the centre plane
     "loftStations": 40,     # sections used to loft the 3D layer surfaces
+    "maxStationGap": 20.0,  # mm: never more span than this between two sections (lofts
+                            # through sparse sections drift from the body by a ply thickness)
     "loftPoints": 120,      # points per loft section
     "flatStations": 60,     # sections used for flat patterns
     "flatPoints": 160,      # points per flat-pattern section
@@ -461,9 +463,10 @@ def ply_mid_depth(ply, rd, j):
 
 
 # --------------------------------------------------------------------------- stations
-def station_positions(s_min, s_max, n, inset, profile=None, extra=()):
+def station_positions(s_min, s_max, n, inset, profile=None, extra=(), max_gap=20.0):
     """Span stations clustered towards both tips and, if a profile function
-    g(s) -> tuple of shape metrics is given, towards rapid shape changes."""
+    g(s) -> tuple of shape metrics is given, towards rapid shape changes.
+    No two neighbouring stations are more than max_gap (mm) apart."""
     a, b = s_min + inset, s_max - inset
     if profile is None:
         base = [a + (b - a) * t for t in geom.clustered_params(n - 1, 0.6)]
@@ -505,6 +508,16 @@ def station_positions(s_min, s_max, n, inset, profile=None, extra=()):
         if keep[i + 1] - keep[i] < 2 * min_gap:
             break
         keep.insert(i + 1, 0.5 * (keep[i] + keep[i + 1]))
+    # Clustering at the hub and tips can leave long mid-span stretches with
+    # few sections; a loft there wanders from the real surface (ply-thick
+    # voids, dips beside a pod), so wide gaps are filled evenly.
+    if max_gap and max_gap > 0:
+        out = [keep[0]]
+        for v in keep[1:]:
+            k = int(math.ceil((v - out[-1]) / max_gap - 1e-9))
+            out += [out[-1] + (v - out[-1]) * i / k for i in range(1, k)]
+            out.append(v)
+        keep = out
     return keep
 
 

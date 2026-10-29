@@ -575,7 +575,7 @@ def generate(stack_data, user_materials, log, progress):
     progress("Sampling sections", 0, 1)
     raw = sample_sections(native, frame, int(st["loftStations"]), float(st["tipInset"]),
                           model.span_limit_stations(stack, frame) + ([0.0] if frame.get("symmetric", True) else []),
-                          lambda k, n: progress("Sampling sections", k, n))
+                          lambda k, n: progress("Sampling sections", k, n), float(st.get("maxStationGap", 20.0)))
     sections = engine.build_sections(raw, int(st["loftPoints"]), float(st["chordRefSmoothing"]))
     if len(sections) < 3:
         raise FusionError("Could not slice the body; check the span axis.")
