@@ -19,13 +19,14 @@ DEFAULT_SETTINGS = {
     "flatStations": 60,     # sections used for flat patterns
     "flatPoints": 160,      # points per flat-pattern section
     "analysisPoints": 200,  # points used for thickness / medial analysis
-    "dropRatio": 20.0,      # ply drop ramp length = ratio x row thickness
+    "dropRatio": 10.0,      # ply drop ramp length = ratio x ply thickness
     "minGap": 0.15,         # mm: minimum half-thickness kept inside an inner surface
     "chordRefSmoothing": 0.05,  # chord limits use LE/TE smoothed over this share of
                                 # the span, so a centre hub does not drag bands sideways
     "mouldVf": 0.58,        # fibre volume fraction in the mould (compressed plies); 0 = library values
     "tipSchedule": True,    # drop plies spanwise towards the tips so the stack always fits
     "tipCoreMin": 1.0,      # mm: core thickness at which inner plies start to end
+    "tipDropSpacing": 10.0, # mm: minimum span distance between successive tip ply drops
     "plyEndRatio": 1.0,     # inner plies stop where the space inside the layers above
                             # them is less than ratio x ply thickness (no feather edges)
     "tipInset": 0.4,        # mm: first/last station inset from the body ends

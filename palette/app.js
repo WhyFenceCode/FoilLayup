@@ -753,8 +753,38 @@ function onGenerateDone(r) {
     <tr><td>Core (incl. drape gaps)</td><td class="num">${fmt(core, 1)} g</td></tr>
     <tr><th>Finished part</th><th class="num">${fmt(part, 1)} g</th></tr>
     ${ext ? `<tr><td>External layers (removed after cure), dry</td><td class="num">${fmt(extDry, 1)} g</td></tr>` : ""}
-  </table><p class="hint">Dry fibre = ply area × fabric g/m² (area = body volume ÷ ply thickness). With resin uses the laminate density at the material's Vf in the library.</p>`;
+  </table>`;
+  if (r.breakdown) html += breakdownTable(r.breakdown);
+  html += `<p class="hint">Dry fibre = ply area × fabric g/m² (area = body volume ÷ ply thickness). With resin uses the laminate density at the in-mould Vf.</p>`;
   $("#results").innerHTML = html;
+}
+/* Mass by material, then fibre totals only where a fibre has several materials
+   (same rule as engine.mass_breakdown). rows: {material, fibre, dry_g, wet_g}. */
+function massBreakdown(rows) {
+  const mats = new Map();
+  for (const r of rows) {
+    const m = mats.get(r.material) || { material: r.material, fibre: r.fibre || "", dry_g: 0, wet_g: 0, plies: 0 };
+    m.dry_g += r.dry_g || 0;
+    m.wet_g += r.wet_g || 0;
+    m.plies += 1;
+    mats.set(r.material, m);
+  }
+  const byMaterial = [...mats.values()];
+  const fib = new Map();
+  for (const m of byMaterial) {
+    if (!m.fibre) continue;
+    const f = fib.get(m.fibre) || { fibre: m.fibre, dry_g: 0, wet_g: 0, materials: 0 };
+    f.dry_g += m.dry_g; f.wet_g += m.wet_g; f.materials += 1;
+    fib.set(m.fibre, f);
+  }
+  return { byMaterial, byFibre: [...fib.values()].filter((f) => f.materials > 1) };
+}
+function breakdownTable(b) {
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  let h = `<h3>Mass by material</h3><table class="tbl mass"><tr><th>Material</th><th>Plies</th><th>Dry fibre g</th><th>With resin g</th></tr>`;
+  h += b.byMaterial.map((m) => `<tr><td>${esc(m.material)}</td><td class="num">${m.plies}</td><td class="num"><b>${fmt(m.dry_g, 1)}</b></td><td class="num">${fmt(m.wet_g, 1)}</td></tr>`).join("");
+  h += b.byFibre.map((f) => `<tr><th>All ${esc(f.fibre)}</th><td></td><th class="num">${fmt(f.dry_g, 1)}</th><th class="num">${fmt(f.wet_g, 1)}</th></tr>`).join("");
+  return h + "</table>";
 }
 function onFlattenDone(r) {
   $("#busy").textContent = "";
@@ -770,6 +800,10 @@ function onFlattenDone(r) {
     r.patterns.map((b) => `<tr><td>${esc(b.label)}</td><td>${esc(b.material)}</td><td class="num">${b.angle_deg}</td><td>${esc(b.seam)}</td>
       <td class="num">${fmt(b.area_m2, 4)}</td><td class="num"><b>${fmt(b.dry_fabric_g, 1)}</b></td><td class="num">${fmt(b.with_resin_g, 1)}</td><td class="num">${fmt(b.length_mm, 0)} × ${fmt(b.width_mm, 0)}</td>
       <td class="num">${fmt(b.rms_strain_pct, 2)}</td><td class="num">${fmt(b.p95_shear_deg, 1)}</td><td>${badge(b)}</td></tr>`).join("") + "</table>";
+  const byName = {};
+  for (const m of Object.values(S.mats)) byName[m.name] = m;
+  html += breakdownTable(massBreakdown(r.patterns.filter((b) => b.kind !== "ext").map((b) => ({
+    material: b.material, fibre: (byName[b.material] || {}).fibre || "", dry_g: b.dry_fabric_g, wet_g: b.with_resin_g }))));
   html += `<div class="plot" style="margin-top:8px">${r.svg}</div>`;
   $("#results").innerHTML = html;
   const a = $("#openFolder");

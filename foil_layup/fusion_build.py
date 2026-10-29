@@ -19,7 +19,7 @@ import adsk.core
 import adsk.fusion
 
 from . import engine, flatten, geom, materials, model
-from .fusion_geo import CM, MM, FusionError, design, find_by_token, keepout_bodies, load_bounds, \
+from .fusion_geo import CM, MM, FusionError, design, find_by_token, keepout_bodies, load_bounds, refine_for_drops, \
     sample_sections, target_context, detect_frame, to_model, vec, app
 
 ATTR = "FoilLayup"
@@ -579,8 +579,12 @@ def generate(stack_data, user_materials, log, progress):
     lo[0], hi[0] = frame["sMin"], frame["sMax"]
     frame["bbox_local"] = (lo, hi)
     bounds = load_bounds(stack.bound_sketches, frame, log)
-    _dump_debug(stack_data, user_materials, frame, raw, bounds, log)
     engine.log_tip_schedule(engine.tip_schedule(stack, sections, frame, bounds), frame, log)
+    raw, refined = refine_for_drops(native, frame, raw, stack, int(st["loftPoints"]),
+                                    float(st["chordRefSmoothing"]), float(st["tipInset"]))
+    if refined:
+        sections = refined
+    _dump_debug(stack_data, user_materials, frame, raw, bounds, log)
     deps, ext = engine.depth_tables(stack, sections, frame, bounds)
     plan = engine.loft_plan(stack, sections, deps, ext, float(st["minGap"]))
     pieces, _d, _e = engine.plan_pieces(stack, sections, frame, bounds, log, stack_data.get("seamPlan"))
@@ -689,7 +693,7 @@ def generate(stack_data, user_materials, log, progress):
             area_m2 = vol / (t / 10.0) * 1e-4  # volume / thickness
             dry = area_m2 * mat["gsm"]
         report.append({
-            "name": body.name, "role": role, "material": mat["name"],
+            "name": body.name, "role": role, "material": mat["name"], "fibre": mat.get("fibre") or "",
             "volume_cm3": round(vol, 3), "mass_g": round(lam, 2),
             "dry_g": round(dry, 2) if dry is not None else None,
         })
@@ -702,7 +706,12 @@ def generate(stack_data, user_materials, log, progress):
     log("Mass: dry fibre %.1f g, resin %.1f g, laminate %.1f g, core %.1f g, finished part %.1f g%s" % (
         dry_plies, lam_plies - dry_plies, lam_plies, core, part,
         (", external layers %.1f g (removed after cure)" % ext) if ext else ""))
-    return {"bodies": report, "seamPlan": seam_plan, "skipped": skipped,
+    breakdown = engine.mass_breakdown(plies)
+    for m in breakdown["byMaterial"]:
+        log("  %s: dry %.1f g, with resin %.1f g (%d plies)" % (m["material"], m["dry_g"], m["wet_g"], m["plies"]))
+    for f in breakdown["byFibre"]:
+        log("  all %s: dry %.1f g, with resin %.1f g" % (f["fibre"], f["dry_g"], f["wet_g"]))
+    return {"bodies": report, "seamPlan": seam_plan, "skipped": skipped, "breakdown": breakdown,
             "seams": [{"piece": pc.id, "label": pc.label, "msg": pc.seam["msg"], "ok": pc.seam["ok"]}
                       for pc in pieces if pc.seam],
             "frame": {k: frame[k] for k in ("spanAxis", "upAxis", "chordAxis", "sMin", "sMax", "hand")}}

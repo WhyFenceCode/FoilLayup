@@ -8,7 +8,7 @@ import adsk.fusion
 from . import engine, export, materials, model
 from .fusion_build import ATTR
 from .fusion_geo import CM, FusionError, design, find_by_token, keepout_bodies, keepout_field_fn, \
-    load_bounds, preferred_up, sample_sections, target_context, detect_frame
+    load_bounds, preferred_up, refine_for_drops, sample_sections, target_context, detect_frame
 
 
 def _generated_keepout_tools(comp):
@@ -45,6 +45,10 @@ def flatten(stack_data, user_materials, folder, make_sketches, log, progress):
         raise FusionError("Could not slice the body; check the span axis.")
     bounds = load_bounds(stack.bound_sketches, frame, log)
     engine.log_tip_schedule(engine.tip_schedule(stack, sections, frame, bounds), frame, log)
+    _raw, refined = refine_for_drops(native, frame, raw, stack, int(st["flatPoints"]),
+                                     float(st["chordRefSmoothing"]), float(st["tipInset"]))
+    if refined:
+        sections = refined
 
     kos = _generated_keepout_tools(comp)
     if not kos and stack_data.get("keepouts"):

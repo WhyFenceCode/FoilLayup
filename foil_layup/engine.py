@@ -105,7 +105,75 @@ def tip_schedule(stack, sections, frame, bounds=None, zone=(0.1, 0.75)):
             u.tip_end = end
             ends.append((u, end))
         prev = station
+    # stagger: no two plies end at the same place; an earlier drop moves inward
+    gap = float(st.get("tipDropSpacing", 10.0))
+    if gap > 0:
+        for k in range(len(ends) - 2, -1, -1):
+            u, e = ends[k]
+            nxt = ends[k + 1][1]
+            if e > nxt - gap:
+                e = nxt - gap
+                u.tip_end = e
+                ends[k] = (u, e)
     return ends
+
+
+def drop_stations(stack, frame):
+    """Span positions to add as sections so lofts and patterns follow every
+    ply drop tightly: each ply end and the end of its drape ramp (otherwise
+    the inner layers drape over a whole station gap, leaving a long void)."""
+    sym = frame.get("symmetric", True)
+    ratio = float(stack.settings["dropRatio"])
+    out = []
+
+    def add(sr):
+        if sr is None or sr < 0:
+            return
+        out.extend([sr, -sr] if sym else [sr + frame["sMin"]])
+
+    for u in stack.units:
+        ramp = max(ratio * u.t, 1.5)
+        if u.tip_end is not None:
+            add(u.tip_end)
+            add(u.tip_end + ramp)
+        if u.span:
+            s0, s1 = u.span
+            if s0 is not None:
+                add(s0 - ramp)
+            if s1 is not None:
+                add(s1 + ramp)
+    return out
+
+
+def mass_breakdown(rows):
+    """Laminate mass by material and by fibre, dry and with resin.
+
+    rows: dicts with material, fibre, dry_g, mass_g (plies and fills only).
+    byFibre only lists a fibre that has more than one material (e.g. carbon
+    twill + carbon UD); a single material already is its fibre total.
+    """
+    mats, order = {}, []
+    for r in rows:
+        key = r["material"]
+        if key not in mats:
+            mats[key] = {"material": key, "fibre": r.get("fibre") or "", "dry_g": 0.0, "wet_g": 0.0, "plies": 0}
+            order.append(key)
+        m = mats[key]
+        m["dry_g"] += r.get("dry_g") or 0.0
+        m["wet_g"] += r.get("mass_g") or 0.0
+        m["plies"] += 1
+    by_mat = [dict(mats[k], dry_g=round(mats[k]["dry_g"], 1), wet_g=round(mats[k]["wet_g"], 1)) for k in order]
+    fib = {}
+    for m in by_mat:
+        if not m["fibre"]:
+            continue
+        f = fib.setdefault(m["fibre"], {"fibre": m["fibre"], "dry_g": 0.0, "wet_g": 0.0, "materials": 0})
+        f["dry_g"] += m["dry_g"]
+        f["wet_g"] += m["wet_g"]
+        f["materials"] += 1
+    by_fib = [dict(f, dry_g=round(f["dry_g"], 1), wet_g=round(f["wet_g"], 1))
+              for f in fib.values() if f["materials"] > 1]
+    return {"byMaterial": by_mat, "byFibre": by_fib}
 
 
 def log_tip_schedule(ends, frame, log):

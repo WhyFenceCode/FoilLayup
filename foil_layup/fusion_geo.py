@@ -7,7 +7,7 @@ import math
 import adsk.core
 import adsk.fusion
 
-from . import geom, model
+from . import engine, geom, model
 
 CM = 0.1   # mm -> cm
 MM = 10.0  # cm -> mm
@@ -226,6 +226,25 @@ def raw_section(native_body, frame, s, tol_mm=0.01):
     if not closed:
         return None
     return max(closed, key=lambda lp: abs(geom.signed_area(lp)))
+
+
+def refine_for_drops(native_body, frame, raw, stack, m, smoothing, inset):
+    """Add sections at every ply end and drape-ramp end (engine.drop_stations)
+    and rebuild the section list. The tip drop schedule is kept as computed."""
+    ends = {u.id: u.tip_end for u in stack.units}
+    have = [s for s, _l in raw]
+    lo, hi = frame["sMin"] + inset, frame["sMax"] - inset
+    add = []
+    for s in sorted(set(round(v, 3) for v in engine.drop_stations(stack, frame))):
+        if lo <= s <= hi and all(abs(s - h) > 0.5 for h in have + add):
+            add.append(s)
+    if not add:
+        return raw, None
+    raw2 = sorted(raw + [(s, raw_section(native_body, frame, s)) for s in add], key=lambda r: r[0])
+    sections = engine.build_sections(raw2, m, smoothing)
+    for u in stack.units:
+        u.tip_end = ends[u.id]
+    return raw2, sections
 
 
 def section_profile(loop):
