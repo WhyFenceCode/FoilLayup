@@ -6,6 +6,29 @@ geometry, seams and flat patterns happens here.
 from . import flatten, geom, model, seams
 
 
+def symmetric_raw(raw, tol=0.5):
+    """Raw sections of a foil that is symmetric about s = 0, made exactly so:
+    every station gets a mirror twin at -s with the same section shape (the
+    right-hand one where both exist), so flat patterns come out symmetric."""
+    by = []  # [|s|, s, loop]
+    for s, loop in raw:
+        if not loop:
+            continue
+        a = abs(s)
+        hit = next((e for e in by if abs(e[0] - a) <= tol), None)
+        if hit is None:
+            by.append([a, s, loop])
+        elif s >= 0 > hit[1]:
+            hit[:] = [a, s, loop]
+    out = []
+    for a, s, loop in by:
+        if a <= tol:
+            out.append((0.0, loop))
+        else:
+            out += [(a, loop), (-a, loop)]
+    return sorted(out, key=lambda r: r[0])
+
+
 def build_sections(raw, m, chord_smoothing=0.05):
     """raw: list of (s, loop2d). Returns Section objects (skips degenerate),
     with the smoothed chord reference used by chord-% limits."""
@@ -526,11 +549,21 @@ def flatten_all(stack, sections, frame, bounds, keepout_fn=None, progress=None, 
     pieces, deps, ext = plan_pieces(stack, sections, frame, bounds, log, seam_plan)
     settings = dict(stack.settings)
     settings["_hand"] = frame.get("hand", 1)
+    settings["_symmetric"] = frame.get("symmetric", True) and _sections_mirrored(sections)
     results = []
+    done = {}  # (ply id, span segment) -> parts, to mirror the other wing's piece
     for n, pc in enumerate(pieces):
         if progress and not progress(n, len(pieces), pc.label):
             break
-        parts = flatten.flatten_piece(pc, sections, settings, keepout_fn)
+        twin = None
+        if settings["_symmetric"] and pc.seg and flatten.mirror_symmetric_fabric(pc):
+            twin = done.get((pc.ply.id if pc.ply else pc.id, (-pc.seg[1], -pc.seg[0])))
+        if twin is not None:
+            parts = [flatten.mirror_part(p) for p in twin[1]]
+        else:
+            parts = flatten.flatten_piece(pc, sections, settings, keepout_fn)
+        if pc.seg:
+            done[(pc.ply.id if pc.ply else pc.id, pc.seg)] = (pc, parts)
         for k, part in enumerate(parts):
             label = "%s %s" % (pc.id, pc.label) + ("" if len(parts) == 1 else " part %d" % (k + 1))
             mat = pc.material
@@ -559,7 +592,14 @@ def flatten_all(stack, sections, frame, bounds, keepout_fn=None, progress=None, 
                     "p95_shear_deg": round(part["stats"].get("maxShear", 0.0), 1),
                     "mean_shear_deg": round(part["stats"].get("meanShear", 0.0), 2),
                     "holes": len(part["holes"]),
+                    "symmetry": ("mirror of %s" % twin[0].id) if twin is not None else
+                                ("symmetric about centre" if part.get("symmetric") else ""),
                 },
             })
             results.append(part)
     return results, pieces
+
+
+def _sections_mirrored(sections, tol=1e-3):
+    n = len(sections)
+    return n >= 3 and all(abs(sections[i].s + sections[n - 1 - i].s) < tol for i in range(n))

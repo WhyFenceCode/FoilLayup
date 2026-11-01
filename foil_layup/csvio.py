@@ -133,7 +133,7 @@ def flatten_report_csv(res):
     """CSV of a Flatten result: the pattern table plus mass by material."""
     pats = res.get("patterns") or []
     cols = ["label", "material", "angle_deg", "seam", "area_m2", "dry_fabric_g", "with_resin_g",
-            "length_mm", "width_mm", "rms_strain_pct", "p95_shear_deg", "holes"]
+            "length_mm", "width_mm", "rms_strain_pct", "p95_shear_deg", "holes", "symmetry"]
     sections = [
         ("Foil Layup flat patterns", None, [["generated", res.get("when", "")], ["folder", res.get("folder", "")],
                                             ["roll length mm", round(res["rollLength"], 1) if isinstance(res.get("rollLength"), (int, float)) else ""]]),

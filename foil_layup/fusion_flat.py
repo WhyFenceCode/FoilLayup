@@ -40,6 +40,9 @@ def flatten(stack_data, user_materials, folder, make_sketches, log, progress):
     raw = sample_sections(native, frame, int(st["flatStations"]), float(st["tipInset"]),
                           model.span_limit_stations(stack, frame),
                           lambda k, n: progress("Sampling sections", k, n), float(st.get("maxStationGap", 20.0)))
+    symmetric = frame.get("symmetric", True)
+    if symmetric:
+        raw = engine.symmetric_raw(raw)
     sections = engine.build_sections(raw, int(st["flatPoints"]), float(st["chordRefSmoothing"]))
     if len(sections) < 3:
         raise FusionError("Could not slice the body; check the span axis.")
@@ -49,6 +52,12 @@ def flatten(stack_data, user_materials, folder, make_sketches, log, progress):
                                      float(st["chordRefSmoothing"]), float(st["tipInset"]))
     if refined:
         sections = refined
+        if symmetric:  # the added drop stations, mirrored exactly as well
+            ends = {u.id: u.tip_end for u in stack.units}
+            sections = engine.build_sections(engine.symmetric_raw(_raw), int(st["flatPoints"]),
+                                             float(st["chordRefSmoothing"]))
+            for u in stack.units:
+                u.tip_end = ends[u.id]
 
     kos = _generated_keepout_tools(comp)
     if not kos and stack_data.get("keepouts"):

@@ -671,10 +671,173 @@ def transform_loops(loops, rotate, mirror):
     return out
 
 
+# --------------------------------------------------------------------------- symmetry
+def mirror_symmetric_fabric(piece):
+    """True if the ply looks the same in a mirror across the span centre: any
+    angle that is a multiple of 90 deg, a balanced woven fabric at any angle
+    (its +45 mirror is -45 = the weft at +45), or a mat/process layer."""
+    a = piece.angle % 90.0
+    return a < 1e-6 or a > 90.0 - 1e-6 or fibre_model_for(piece.material) in ("woven", "paper")
+
+
+def _mirrored_rows(X, tol=1e-3):
+    """True if the grid's stations come in mirror pairs about s = 0."""
+    n = len(X)
+    return n >= 3 and all(abs(X[i][0][0] + X[n - 1 - i][0][0]) < tol for i in range(n))
+
+
+def _symmetrize_field(G):
+    n = len(G)
+    out = [list(r) for r in G]
+    for i in range(n // 2):
+        a, b = G[i], G[n - 1 - i]
+        avg = [x if x == y else 0.5 * (x + y) for x, y in zip(a, b)]
+        out[i], out[n - 1 - i] = avg, list(avg)
+    return out
+
+
+def _symmetrize_nodes(U, n):
+    """Make the flat grid exactly mirror symmetric: node (i, k) and its mirror
+    (n-1-i, k) are averaged across the best-fit mirror line."""
+    pairs = [(a, (n - 1 - a[0], a[1])) for a in U if a[0] < n - 1 - a[0] and (n - 1 - a[0], a[1]) in U]
+    if len(pairs) < 3:
+        return
+    nx = ny = cx = cy = 0.0
+    for a, b in pairs:
+        pa, pb = U[a], U[b]
+        nx += pb[0] - pa[0]
+        ny += pb[1] - pa[1]
+        cx += pa[0] + pb[0]
+        cy += pa[1] + pb[1]
+    L = math.hypot(nx, ny)
+    if L < 1e-9:
+        return
+    nx, ny = nx / L, ny / L
+    cx, cy = cx / (2 * len(pairs)), cy / (2 * len(pairs))
+
+    def refl(p, f=2.0):
+        d = (p[0] - cx) * nx + (p[1] - cy) * ny
+        return (p[0] - f * d * nx, p[1] - f * d * ny)
+
+    for a, b in pairs:
+        r = refl(U[b])
+        q = (0.5 * (U[a][0] + r[0]), 0.5 * (U[a][1] + r[1]))
+        U[a], U[b] = q, refl(q)
+    if n % 2:
+        for key in U:
+            if 2 * key[0] == n - 1:
+                U[key] = refl(U[key], 1.0)
+
+
+def mirror_part(part):
+    """The same pattern mirrored left to right (the other wing's piece)."""
+    def mx(poly):
+        return [(-x, y) for x, y in reversed(poly)]
+    x0, y0, x1, y1 = part["bbox"]
+    out = dict(part, outline=mx(part["outline"]), holes=[mx(h) for h in part["holes"]],
+               bbox=(-x1, y0, -x0, y1))
+    mk = part.get("marks")
+    if mk:
+        out["marks"] = {
+            "right": None if mk["right"] is None else (-mk["right"][0], mk["right"][1]),
+            "fronts": [dict(f, at=(-f["at"][0], f["at"][1]), dir=(-f["dir"][0], f["dir"][1]))
+                       for f in mk["fronts"]],
+            "le": [[(-x, y) for x, y in pl] for pl in mk["le"]],
+        }
+    return out
+
+
+# --------------------------------------------------------------------------- direction marks
+def _direction_samples(U, X, G, j0, m, le, right_sign, rotate, mirror):
+    """Per flat node: (point, side, right vector or None, front vector or None),
+    all in the final pattern orientation, plus the leading-edge line(s)."""
+    def tf(p):
+        return transform_loops([[p]], rotate, mirror)[0][0]
+
+    def unit2(a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        L = math.hypot(dx, dy)
+        return (dx / L, dy / L) if L > 1e-12 else None
+
+    out = []
+    for (i, k), p in U.items():
+        if G[i][k] < 0:
+            continue
+        j = (j0 + k) % m
+        side = "top" if j < le else "bottom"
+        rv = fv = None
+        b = (i + 1, k)
+        if b in U and G[i + 1][k] >= 0:
+            ds = X[i + 1][k][0] - X[i][k][0]
+            u = unit2(p, U[b])
+            if u and ds != 0:
+                sg = right_sign * (1.0 if ds > 0 else -1.0)
+                rv = tf((sg * u[0], sg * u[1]))
+        c = (i, k + 1)
+        if c in U and G[i][k + 1] >= 0:
+            j2 = (j0 + k + 1) % m
+            u = unit2(p, U[c])
+            if u and j < le and 0 < j2 <= le:      # top: increasing j runs to the LE
+                fv = tf(u)
+            elif u and j >= le and j2 > le:        # bottom: increasing j runs to the TE
+                fv = tf((-u[0], -u[1]))
+        out.append((tf(p), side, rv, fv))
+    # leading edge: the column at the LE, station by station
+    lines, cur = [], []
+    kle = (le - j0) % m
+    for i in range(len(X)):
+        key = next((key for key in ((i, kle), (i, kle + m)) if key in U and G[key[0]][key[1]] >= 0), None)
+        if key is None:
+            if len(cur) > 1:
+                lines.append(cur)
+            cur = []
+            continue
+        cur.append(tf(U[key]))
+    if len(cur) > 1:
+        lines.append(cur)
+    return out, lines
+
+
+def _marks_for(samples, le_lines, outline):
+    """Right and front directions for one pattern part (the samples inside it)."""
+    rx = ry = 0.0
+    sides = {}
+    for p, side, rv, fv in samples:
+        if outline is not None and not geom.point_in_polygon(p, outline):
+            continue
+        if rv:
+            rx += rv[0]
+            ry += rv[1]
+        sd = sides.setdefault(side, [0.0, 0.0, 0.0, 0.0, 0])
+        sd[0] += p[0]
+        sd[1] += p[1]
+        sd[4] += 1
+        if fv:
+            sd[2] += fv[0]
+            sd[3] += fv[1]
+    L = math.hypot(rx, ry)
+    total = sum(v[4] for v in sides.values()) or 1
+    fronts = []
+    for side, (sx, sy, fx, fy, cnt) in sorted(sides.items(), reverse=True):
+        fl = math.hypot(fx, fy)
+        if cnt < 0.08 * total or fl < 1e-9:
+            continue
+        fronts.append({"side": side, "at": (sx / cnt, sy / cnt), "dir": (fx / fl, fy / fl)})
+    le = le_lines if outline is None else [
+        [p for p in pl if geom.point_in_polygon(p, outline)] for pl in le_lines]
+    return {"right": (rx / L, ry / L) if L > 1e-9 else None, "fronts": fronts,
+            "le": [pl for pl in le if len(pl) > 1]}
+
+
 def flatten_piece(piece, sections, settings, keepout_fn=None):
     """Full pipeline for one piece. Returns a dict describing the pattern."""
     overlap = float(settings.get("seamOverlap", 0.0))
     X, G, info = build_strip(piece, sections, overlap)
+    mid = sections[len(sections) // 2]
+    # right = forward x up; forward runs TE -> LE in the section, so its sign
+    # and the frame's handedness decide which way along the span is right
+    sigma = 1.0 if mid.te_pt[0] > mid.le_pt[0] else -1.0
+    right_sign = -sigma * int(settings.get("_hand", 1))
     if keepout_fn is not None:
         flat_nodes = [p for row in X for p in row]
         H = keepout_fn(flat_nodes)
@@ -701,16 +864,25 @@ def flatten_piece(piece, sections, settings, keepout_fn=None):
         lo = max(0, run[0] - 1)
         hi = min(len(X) - 1, run[-1] + 1)
         Xr, Gr = X[lo:hi + 1], G[lo:hi + 1]
+        # a symmetric foil gives symmetric patterns: the same field both sides
+        # of the centre, and the flat grid made exactly mirror symmetric after
+        sym = bool(settings.get("_symmetric")) and mirror_symmetric_fabric(piece) and _mirrored_rows(Xr)
+        if sym:
+            Gr = _symmetrize_field(Gr)
         U, active, stats = flatten_grid(Xr, Gr, int(settings.get("flatIterations", 250)),
                                         angle_deg=piece.angle, fibre_model=fibre_model_for(piece.material),
                                         hand=int(settings.get("_hand", 1)))
         if U is None:
             continue
+        if sym:
+            _symmetrize_nodes(U, len(Xr))
         loops = contour(U, Gr, active)
         if not loops:
             continue
         rotate, mirror = orient_pattern(U, Xr, active, piece.angle, int(settings.get("_hand", 1)))
         loops = transform_loops(loops, rotate, mirror)
+        samples, le_lines = _direction_samples(U, Xr, Gr, info["j0"], sections[0].m, sections[0].le,
+                                               right_sign, rotate, mirror)
         loops = [simplify(lp, 0.02) for lp in loops]
         loops.sort(key=lambda lp: -abs(geom.signed_area(lp)))
         # drop slivers left where a ply ends at a tip (< 1% of the main part or < 5 cm2)
@@ -724,6 +896,7 @@ def flatten_piece(piece, sections, settings, keepout_fn=None):
             else:
                 outers.append(lp)
         for o in outers:
+            marks = _marks_for(samples, le_lines, o if len(outers) > 1 else None)
             hs = [h for h in holes if geom.point_in_polygon(h[0], o)]
             area = abs(geom.signed_area(o)) - sum(abs(geom.signed_area(h)) for h in hs)
             xs = [p[0] for p in o]
@@ -735,5 +908,7 @@ def flatten_piece(piece, sections, settings, keepout_fn=None):
                 "bbox": (min(xs), min(ys), max(xs), max(ys)),
                 "spanAngle": -piece.angle,  # span direction relative to +X (warp)
                 "stats": stats,
+                "marks": marks,
+                "symmetric": sym,
             })
     return parts
